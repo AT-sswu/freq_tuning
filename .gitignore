@@ -1,0 +1,17 @@
+# 가상환경
+venv/
+env/
+.venv/
+
+# PyCharm
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints/

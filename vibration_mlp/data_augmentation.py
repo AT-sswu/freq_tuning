@@ -23,16 +23,8 @@ def calculate_sample_rate(df, time_column='Time_us'):
     return sample_rate
 
 
-def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60], use_log_scale=True):
-    """
-    주파수 도메인 특징 추출 (로그 스케일 적용)
-
-    Args:
-        signal: 입력 신호
-        sample_rate: 샘플링 레이트
-        target_bands: 목표 주파수 대역
-        use_log_scale: 로그 스케일 변환 사용 여부
-    """
+def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60]):
+    """주파수 도메인 특징 추출"""
     n = len(signal)
     fft_vals = fft(signal)
     freqs = fftfreq(n, 1 / sample_rate)
@@ -47,42 +39,22 @@ def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60
     for target_freq in target_bands:
         band_mask = (freqs >= target_freq - 5) & (freqs <= target_freq + 5)
         band_energy = np.sum(fft_vals[band_mask] ** 2)
-
-        # 로그 스케일 변환 (0 방지)
-        if use_log_scale:
-            band_energy = np.log10(band_energy + 1e-10)
-
         features.append(band_energy)
 
     # 30-60Hz 전체 에너지
     full_band_mask = (freqs >= 30) & (freqs <= 60)
     full_band_energy = np.sum(fft_vals[full_band_mask] ** 2)
-
-    if use_log_scale:
-        full_band_energy = np.log10(full_band_energy + 1e-10)
-
     features.append(full_band_energy)
 
-    # 지배 주파수 (로그 스케일 불필요)
+    # 지배 주파수
     dominant_freq = freqs[np.argmax(fft_vals)]
     features.append(dominant_freq)
 
     return np.array(features)
 
 
-def calculate_power_output(energy, target_freq, use_log_scale=True):
-    """
-    에너지 → 전력 변환
-
-    Args:
-        energy: 입력 에너지 (로그 스케일일 수 있음)
-        target_freq: 목표 공진 주파수
-        use_log_scale: 입력 에너지가 로그 스케일인지 여부
-    """
-    # 로그 스케일이면 원래 스케일로 복원
-    if use_log_scale:
-        energy = 10 ** energy
-
+def calculate_power_output(energy, target_freq):
+    """에너지 → 전력 변환"""
     efficiency = {
         30: 0.65,
         40: 0.80,
@@ -177,19 +149,16 @@ def process_single_file_with_augmentation(
         window_size=8192,
         stride=4096,
         num_augmentations=2,
-        apply_filter=True,
-        use_log_scale=True
+        apply_filter=True
 ):
     """
-    단일 CSV 파일 처리: Sliding Window + Augmentation + Log Scale
+    단일 CSV 파일 처리: Sliding Window + Augmentation
 
     Args:
         file_path: CSV 파일 경로
         window_size: 윈도우 크기 (기본 8192 = 약 27초 @ 296Hz)
         stride: 이동 간격 (기본 4096 = 50% 오버랩)
         num_augmentations: 윈도우당 생성할 증강 데이터 수
-        apply_filter: 저역통과 필터 적용 여부
-        use_log_scale: 로그 스케일 변환 사용 여부
 
     Returns:
         X_list, y_list (특징, 전력 값 리스트)
@@ -225,8 +194,8 @@ def process_single_file_with_augmentation(
         augmented_windows = augment_window(window, sample_rate, num_augmentations)
 
         for aug_window in augmented_windows:
-            # 특징 추출 (로그 스케일 적용)
-            features = extract_frequency_features(aug_window, sample_rate, use_log_scale=use_log_scale)
+            # 특징 추출
+            features = extract_frequency_features(aug_window, sample_rate)
 
             # 전력 계산
             target_freqs = [30, 40, 50, 60]
@@ -234,13 +203,13 @@ def process_single_file_with_augmentation(
 
             for idx, target_freq in enumerate(target_freqs):
                 band_energy = features[idx]
-                power = calculate_power_output(band_energy, target_freq, use_log_scale=use_log_scale)
+                power = calculate_power_output(band_energy, target_freq)
                 powers.append(power)
 
             X_list.append(features)
             y_list.append(powers)
 
-    print(f"  증강 후 최종 샘플 수: {len(X_list)}개 (로그 스케일: {use_log_scale})")
+    print(f"  증강 후 최종 샘플 수: {len(X_list)}개")
 
     return X_list, y_list
 
@@ -251,14 +220,10 @@ def create_augmented_dataset(
         window_size=8192,
         stride=4096,
         num_augmentations=2,
-        apply_filter=True,
-        use_log_scale=True
+        apply_filter=True
 ):
     """
-    전체 데이터셋에 대해 증강 적용 (로그 스케일 포함)
-
-    Args:
-        use_log_scale: True이면 로그 스케일 변환 적용, False이면 원본 스케일
+    전체 데이터셋에 대해 증강 적용
     """
     data_path = Path(data_dir)
     csv_files = sorted(list(data_path.glob("*.csv")))
@@ -274,7 +239,6 @@ def create_augmented_dataset(
     print(f"  이동 간격: {stride} 샘플 (오버랩 {(1 - stride / window_size) * 100:.0f}%)")
     print(f"  윈도우당 증강 수: {num_augmentations}개")
     print(f"  총 파일 수: {len(csv_files)}개")
-    print(f"  로그 스케일 변환: {'적용' if use_log_scale else '미적용'}")
     print(f"{'=' * 60}\n")
 
     all_X = []
@@ -289,8 +253,7 @@ def create_augmented_dataset(
                 window_size=window_size,
                 stride=stride,
                 num_augmentations=num_augmentations,
-                apply_filter=apply_filter,
-                use_log_scale=use_log_scale
+                apply_filter=apply_filter
             )
 
             all_X.extend(X_list)
@@ -298,8 +261,6 @@ def create_augmented_dataset(
 
         except Exception as e:
             print(f"  ✗ 오류: {e}")
-            import traceback
-            traceback.print_exc()
             continue
 
     # numpy 배열로 변환
@@ -317,23 +278,16 @@ def create_augmented_dataset(
     print(f"  출력 형상: {y.shape}")
     print(f"{'=' * 60}")
 
-    # 저장 파일명에 로그 스케일 여부 표시
-    filename = "preprocessed_data_augmented_log.npz" if use_log_scale else "preprocessed_data_augmented.npz"
-    output_path = Path(output_dir) / filename
-    np.savez(output_path, X=X, y=y, target_freqs=[30, 40, 50, 60], use_log_scale=use_log_scale)
+    # 저장
+    output_path = Path(output_dir) / "preprocessed_data_augmented.npz"
+    np.savez(output_path, X=X, y=y, target_freqs=[30, 40, 50, 60])
     print(f"\n저장 완료: {output_path}")
 
     # 통계 정보
     print(f"\n[데이터 통계]")
-    if use_log_scale:
-        print(f"입력 특징 범위 (로그): {X.min():.2f} ~ {X.max():.2f}")
-        print(f"  → 원본 스케일 환산: {10 ** X.min():.2e} ~ {10 ** X.max():.2e}")
-    else:
-        print(f"입력 특징 범위: {X.min():.2e} ~ {X.max():.2e}")
-
+    print(f"입력 특징 범위: {X.min():.2e} ~ {X.max():.2e}")
     print(f"출력 전력 범위: {y.min():.2f} ~ {y.max():.2f} mW")
     print(f"출력 전력 평균: {y.mean():.2f} mW")
-    print(f"출력 전력 표준편차: {y.std():.2f} mW")
 
     return X, y
 
@@ -347,7 +301,6 @@ if __name__ == "__main__":
     WINDOW_SIZE = 8192  # 약 27초 @ 296Hz
     STRIDE = 4096  # 50% 오버랩 (권장: 2048~4096)
     NUM_AUGMENTATIONS = 2  # 윈도우당 2개 증강 (원본 포함 총 3개)
-    USE_LOG_SCALE = True  # 로그 스케일 변환 사용
 
     # 증강 실행
     X, y = create_augmented_dataset(
@@ -356,11 +309,5 @@ if __name__ == "__main__":
         window_size=WINDOW_SIZE,
         stride=STRIDE,
         num_augmentations=NUM_AUGMENTATIONS,
-        apply_filter=True,
-        use_log_scale=USE_LOG_SCALE
+        apply_filter=True
     )
-
-    print(f"\n{'=' * 60}")
-    print(f"[완료] 로그 스케일 변환 {'적용' if USE_LOG_SCALE else '미적용'}")
-    print(f"다음 단계: train.py 실행")
-    print(f"{'=' * 60}")

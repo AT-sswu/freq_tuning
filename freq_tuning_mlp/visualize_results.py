@@ -310,7 +310,7 @@ def visualize_model_results(model_path, data_path, save_dir, normalize=True):
 if __name__ == "__main__":
     # 경로 설정
     MODEL_PATH = "/Users/seohyeon/AT_freq_tuning/model_results/best_model.pth"
-    DATA_PATH = "/Users/seohyeon/AT_freq_tuning/vibration_mlp/preprocess_results/preprocessed_data_augmented_log.npz"
+    DATA_PATH = "/freq_tuning_mlp/preprocess_results/preprocessed_data_augmented_log.npz"
     SAVE_DIR = "/Users/seohyeon/AT_freq_tuning/model_results"
 
     # 정규화 옵션 선택

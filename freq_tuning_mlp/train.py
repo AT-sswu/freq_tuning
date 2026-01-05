@@ -171,7 +171,7 @@ def train_model(data_path, save_dir, epochs=200, batch_size=32, lr=0.001):
 
 
 if __name__ == "__main__":
-    DATA_PATH = "/Users/seohyeon/AT_freq_tuning/vibration_mlp/preprocess_results/preprocessed_data_augmented_log.npz"
+    DATA_PATH = "/freq_tuning_mlp/preprocess_results/preprocessed_data_augmented_log.npz"
     SAVE_DIR = "/Users/seohyeon/AT_freq_tuning/model_results"
 
     model, train_losses, val_losses = train_model(

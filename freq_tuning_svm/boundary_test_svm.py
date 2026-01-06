@@ -18,8 +18,8 @@ except ImportError:
     MODEL_DIR = "./models"
     DATA_DIR = "./data"
     RESONANCE_FREQS = [40, 50, 60]
-    WINDOW_SIZE = 1000
-    STRIDE = 500
+    WINDOW_SIZE = 8192
+    STRIDE = 4096
 
 
 # =========================================================

@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 from scipy.signal import butter, filtfilt
 from scipy.fft import fft, fftfreq
+from sklearn.model_selection import train_test_split
 from config import DATA_DIR, OUTPUT_DIR, RESONANCE_FREQS, WINDOW_SIZE, STRIDE, NUM_AUGMENTATIONS
 
 
@@ -46,7 +47,7 @@ def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60
     full_band_energy = np.sum(fft_vals[full_band_mask] ** 2)
     features.append(full_band_energy)
 
-    # 지배 주파수 (입력 주파수)
+    # 지배 주파수
     dominant_freq = freqs[np.argmax(fft_vals)]
     features.append(dominant_freq)
 
@@ -54,16 +55,7 @@ def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60
 
 
 def assign_label(f_in, res_freqs=RESONANCE_FREQS):
-    """
-    입력 주파수를 가장 가까운 공진 주파수 클래스로 매핑
-
-    Args:
-        f_in: 입력 주파수 (예: 39.8 Hz)
-        res_freqs: 공진 주파수 리스트 [30, 40, 50, 60]
-
-    Returns:
-        클래스 레이블 (0, 1, 2, 3)
-    """
+    """입력 주파수를 가장 가까운 공진 주파수 클래스로 매핑"""
     res_array = np.array(res_freqs)
     return np.argmin(np.abs(res_array - f_in))
 
@@ -95,7 +87,7 @@ def time_shift_augmentation(signal, max_shift=100):
     return signal
 
 
-def augment_window(window, sample_rate, num_augmentations=2):
+def augment_window(window, num_augmentations=2):
     augmented = [window]
     for _ in range(num_augmentations):
         aug_window = window.copy()
@@ -109,122 +101,213 @@ def augment_window(window, sample_rate, num_augmentations=2):
     return augmented
 
 
-def process_single_file(file_path, window_size=8192, stride=4096, num_augmentations=2, apply_filter=True):
-    df = pd.read_csv(file_path)
-
-    if 'Accel_Z' not in df.columns:
-        print(f"  [경고] Accel_Z 없음 - 스킵")
-        return [], [], []
-
-    sample_rate = calculate_sample_rate(df)
-    signal = df['Accel_Z'].dropna().values
-
-    print(f"  원본 신호 길이: {len(signal)} 샘플")
-
-    if apply_filter:
-        signal = butter_lowpass_filter(signal, cutoff=sample_rate / 4, fs=sample_rate)
-
+def process_single_signal(signal, sample_rate, window_size, stride, num_augmentations):
+    """✅ 단일 신호 처리 (슬라이딩 윈도우 + 증강)"""
     windows = sliding_window_split(signal, window_size=window_size, stride=stride)
-    print(f"  Sliding Window 분할: {len(windows)}개 윈도우 생성")
 
     X_list = []
     y_list = []
     freq_list = []
 
     for window in windows:
-        augmented_windows = augment_window(window, sample_rate, num_augmentations)
+        augmented_windows = augment_window(window, num_augmentations)
 
         for aug_window in augmented_windows:
-            # 특징 추출 + 입력 주파수 추출
             features, input_freq = extract_frequency_features(aug_window, sample_rate)
-
-            # 라벨 생성: 입력 주파수 → 가장 가까운 공진 주파수 클래스
             label = assign_label(input_freq)
 
             X_list.append(features)
             y_list.append(label)
             freq_list.append(input_freq)
 
-    print(f"  증강 후 최종 샘플 수: {len(X_list)}개")
-
     return X_list, y_list, freq_list
 
 
-def create_classification_dataset(data_dir, output_dir, window_size=8192, stride=4096, num_augmentations=2):
+def load_all_signals(data_dir):
+    """✅ 모든 CSV 파일을 신호 단위로 로드"""
     data_path = Path(data_dir)
     csv_files = sorted(list(data_path.glob("*.csv")))
 
     if not csv_files:
         raise ValueError(f"CSV 파일을 찾을 수 없습니다: {data_dir}")
 
-    print(f"\n{'=' * 60}")
-    print(f"분류 데이터셋 생성 시작")
-    print(f"{'=' * 60}")
+    signals = []
+    signal_ids = []
+
+    print(f"\n{'=' * 70}")
+    print(f"{'원본 신호 로딩':^70}")
+    print(f"{'=' * 70}")
+    print(f"총 파일 수: {len(csv_files)}개\n")
+
+    for idx, file_path in enumerate(csv_files):
+        try:
+            df = pd.read_csv(file_path)
+
+            if 'Accel_Z' not in df.columns:
+                print(f"  [{idx + 1}] {file_path.name} - ⚠️  Accel_Z 없음, 스킵")
+                continue
+
+            sample_rate = calculate_sample_rate(df)
+            signal = df['Accel_Z'].dropna().values
+            signal = butter_lowpass_filter(signal, cutoff=sample_rate / 4, fs=sample_rate)
+
+            signals.append({
+                'signal': signal,
+                'sample_rate': sample_rate,
+                'file_name': file_path.name,
+                'signal_id': idx
+            })
+            signal_ids.append(idx)
+
+            print(f"  [{idx + 1}] {file_path.name} - ✓ 로드 완료 (길이: {len(signal)})")
+
+        except Exception as e:
+            print(f"  [{idx + 1}] {file_path.name} - ✗ 오류: {e}")
+            continue
+
+    print(f"\n✓ 총 {len(signals)}개 신호 로드 완료")
+    return signals
+
+
+def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
+                                        stride=4096, num_augmentations=2,
+                                        test_size=0.2, random_state=42):
+    """✅ 데이터 누수 방지: 신호 단위로 train/test 분할"""
+
+    print(f"\n{'=' * 70}")
+    print(f"{'분류 데이터셋 생성 (데이터 누수 방지)':^70}")
+    print(f"{'=' * 70}")
     print(f"설정:")
     print(f"  윈도우 크기: {window_size} 샘플")
     print(f"  이동 간격: {stride} 샘플")
     print(f"  윈도우당 증강 수: {num_augmentations}개")
-    print(f"  총 파일 수: {len(csv_files)}개")
+    print(f"  Test 비율: {test_size * 100}%")
     print(f"  공진 주파수 클래스: {RESONANCE_FREQS}")
-    print(f"{'=' * 60}\n")
+    print(f"{'=' * 70}\n")
 
-    all_X = []
-    all_y = []
-    all_freqs = []
+    # Step 1: 모든 신호 로드
+    signals = load_all_signals(data_dir)
 
-    for idx, file_path in enumerate(csv_files, 1):
-        print(f"[{idx}/{len(csv_files)}] 처리 중: {file_path.name}")
+    if len(signals) == 0:
+        raise ValueError("로드된 신호가 없습니다!")
 
-        try:
-            X_list, y_list, freq_list = process_single_file(
-                file_path,
-                window_size=window_size,
-                stride=stride,
-                num_augmentations=num_augmentations,
-                apply_filter=True
-            )
+    # Step 2: 신호 단위로 Train/Test 분할 ✅
+    print(f"\n{'=' * 70}")
+    print(f"{'신호 단위로 Train/Test 분할':^70}")
+    print(f"{'=' * 70}")
 
-            all_X.extend(X_list)
-            all_y.extend(y_list)
-            all_freqs.extend(freq_list)
+    signal_indices = np.arange(len(signals))
+    train_indices, test_indices = train_test_split(
+        signal_indices,
+        test_size=test_size,
+        random_state=random_state
+    )
 
-        except Exception as e:
-            print(f"  ✗ 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+    print(f"Train 신호: {len(train_indices)}개")
+    print(f"Test 신호: {len(test_indices)}개")
 
-    X = np.array(all_X)
-    y = np.array(all_y)
-    freqs = np.array(all_freqs)
+    # Step 3: Train 데이터 생성
+    print(f"\n{'=' * 70}")
+    print(f"{'Train 데이터 생성':^70}")
+    print(f"{'=' * 70}")
 
-    print(f"\n{'=' * 60}")
-    print(f"데이터셋 생성 완료")
-    print(f"{'=' * 60}")
-    print(f"  입력 형상: {X.shape}")
-    print(f"  레이블 형상: {y.shape}")
-    print(f"  입력 주파수 범위: {freqs.min():.2f} ~ {freqs.max():.2f} Hz")
-    print(f"\n[클래스 분포]")
+    X_train_all = []
+    y_train_all = []
+    freq_train_all = []
+
+    for idx in train_indices:
+        signal_data = signals[idx]
+        X_list, y_list, freq_list = process_single_signal(
+            signal_data['signal'],
+            signal_data['sample_rate'],
+            window_size,
+            stride,
+            num_augmentations
+        )
+        X_train_all.extend(X_list)
+        y_train_all.extend(y_list)
+        freq_train_all.extend(freq_list)
+
+    X_train = np.array(X_train_all)
+    y_train = np.array(y_train_all)
+    freq_train = np.array(freq_train_all)
+
+    print(f"Train 데이터: {X_train.shape[0]}개 샘플 생성")
+
+    # Step 4: Test 데이터 생성
+    print(f"\n{'=' * 70}")
+    print(f"{'Test 데이터 생성':^70}")
+    print(f"{'=' * 70}")
+
+    X_test_all = []
+    y_test_all = []
+    freq_test_all = []
+
+    for idx in test_indices:
+        signal_data = signals[idx]
+        X_list, y_list, freq_list = process_single_signal(
+            signal_data['signal'],
+            signal_data['sample_rate'],
+            window_size,
+            stride,
+            num_augmentations
+        )
+        X_test_all.extend(X_list)
+        y_test_all.extend(y_list)
+        freq_test_all.extend(freq_list)
+
+    X_test = np.array(X_test_all)
+    y_test = np.array(y_test_all)
+    freq_test = np.array(freq_test_all)
+
+    print(f"Test 데이터: {X_test.shape[0]}개 샘플 생성")
+
+    # Step 5: 결과 출력
+    print(f"\n{'=' * 70}")
+    print(f"{'데이터셋 생성 완료':^70}")
+    print(f"{'=' * 70}")
+    print(f"Train 형상: X={X_train.shape}, y={y_train.shape}")
+    print(f"Test 형상: X={X_test.shape}, y={y_test.shape}")
+    print(f"Train 주파수 범위: {freq_train.min():.2f} ~ {freq_train.max():.2f} Hz")
+    print(f"Test 주파수 범위: {freq_test.min():.2f} ~ {freq_test.max():.2f} Hz")
+
+    print(f"\n[Train 클래스 분포]")
     for i, freq in enumerate(RESONANCE_FREQS):
-        count = np.sum(y == i)
-        print(f"  클래스 {i} ({freq}Hz): {count}개 ({count / len(y) * 100:.1f}%)")
-    print(f"{'=' * 60}")
+        count = np.sum(y_train == i)
+        print(f"  클래스 {i} ({freq}Hz): {count}개 ({count / len(y_train) * 100:.1f}%)")
 
-    # 저장
+    print(f"\n[Test 클래스 분포]")
+    for i, freq in enumerate(RESONANCE_FREQS):
+        count = np.sum(y_test == i)
+        print(f"  클래스 {i} ({freq}Hz): {count}개 ({count / len(y_test) * 100:.1f}%)")
+
+    print(f"{'=' * 70}")
+
+    # Step 6: 저장
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    save_path = output_path / "classification_data.npz"
-    np.savez(save_path, X=X, y=y, freqs=freqs, resonance_freqs=RESONANCE_FREQS)
-    print(f"\n저장 완료: {save_path}")
 
-    return X, y, freqs
+    save_path = output_path / "classification_data.npz"
+    np.savez(
+        save_path,
+        X_train=X_train, y_train=y_train, freq_train=freq_train,
+        X_test=X_test, y_test=y_test, freq_test=freq_test,
+        train_indices=train_indices,
+        test_indices=test_indices,
+        resonance_freqs=RESONANCE_FREQS
+    )
+    print(f"\n✓ 저장 완료: {save_path}")
+
+    return X_train, y_train, X_test, y_test
 
 
 if __name__ == "__main__":
-    X, y, freqs = create_classification_dataset(
+    X_train, y_train, X_test, y_test = create_classification_dataset_fixed(
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
         window_size=WINDOW_SIZE,
         stride=STRIDE,
-        num_augmentations=NUM_AUGMENTATIONS
+        num_augmentations=NUM_AUGMENTATIONS,
+        test_size=0.2,
+        random_state=42
     )

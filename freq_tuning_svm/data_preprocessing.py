@@ -24,7 +24,7 @@ def calculate_sample_rate(df, time_column='Time_us'):
     return sample_rate
 
 
-def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60]):
+def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS):
     """주파수 도메인 특징 추출"""
     n = len(signal)
     fft_vals = fft(signal)
@@ -36,18 +36,15 @@ def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60
 
     features = []
 
-    # 각 목표 주파수 대역(±5Hz)의 에너지
     for target_freq in target_bands:
         band_mask = (freqs >= target_freq - 5) & (freqs <= target_freq + 5)
         band_energy = np.sum(fft_vals[band_mask] ** 2)
         features.append(band_energy)
 
-    # 30-60Hz 전체 에너지
     full_band_mask = (freqs >= 30) & (freqs <= 60)
     full_band_energy = np.sum(fft_vals[full_band_mask] ** 2)
     features.append(full_band_energy)
 
-    # 지배 주파수
     dominant_freq = freqs[np.argmax(fft_vals)]
     features.append(dominant_freq)
 
@@ -102,7 +99,7 @@ def augment_window(window, num_augmentations=2):
 
 
 def process_single_signal(signal, sample_rate, window_size, stride, num_augmentations):
-    """✅ 단일 신호 처리 (슬라이딩 윈도우 + 증강)"""
+    """단일 신호 처리 (슬라이딩 윈도우 + 증강)"""
     windows = sliding_window_split(signal, window_size=window_size, stride=stride)
 
     X_list = []
@@ -124,7 +121,7 @@ def process_single_signal(signal, sample_rate, window_size, stride, num_augmenta
 
 
 def load_all_signals(data_dir):
-    """✅ 모든 CSV 파일을 신호 단위로 로드"""
+    """모든 CSV 파일을 신호 단위로 로드"""
     data_path = Path(data_dir)
     csv_files = sorted(list(data_path.glob("*.csv")))
 
@@ -132,7 +129,6 @@ def load_all_signals(data_dir):
         raise ValueError(f"CSV 파일을 찾을 수 없습니다: {data_dir}")
 
     signals = []
-    signal_ids = []
 
     print(f"\n{'=' * 70}")
     print(f"{'원본 신호 로딩':^70}")
@@ -144,7 +140,7 @@ def load_all_signals(data_dir):
             df = pd.read_csv(file_path)
 
             if 'Accel_Z' not in df.columns:
-                print(f"  [{idx + 1}] {file_path.name} - ⚠️  Accel_Z 없음, 스킵")
+                print(f"  [{idx + 1}] {file_path.name} - Accel_Z 없음, 스킵")
                 continue
 
             sample_rate = calculate_sample_rate(df)
@@ -157,22 +153,21 @@ def load_all_signals(data_dir):
                 'file_name': file_path.name,
                 'signal_id': idx
             })
-            signal_ids.append(idx)
 
-            print(f"  [{idx + 1}] {file_path.name} - ✓ 로드 완료 (길이: {len(signal)})")
+            print(f"  [{idx + 1}] {file_path.name} - 로드 완료 (길이: {len(signal)})")
 
         except Exception as e:
-            print(f"  [{idx + 1}] {file_path.name} - ✗ 오류: {e}")
+            print(f"  [{idx + 1}] {file_path.name} - 오류: {e}")
             continue
 
-    print(f"\n✓ 총 {len(signals)}개 신호 로드 완료")
+    print(f"\n총 {len(signals)}개 신호 로드 완료")
     return signals
 
 
 def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
                                         stride=4096, num_augmentations=2,
                                         test_size=0.2, random_state=42):
-    """✅ 데이터 누수 방지: 신호 단위로 train/test 분할"""
+    """데이터 누수 방지: 신호 단위로 train/test 분할"""
 
     print(f"\n{'=' * 70}")
     print(f"{'분류 데이터셋 생성 (데이터 누수 방지)':^70}")
@@ -185,13 +180,11 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
     print(f"  공진 주파수 클래스: {RESONANCE_FREQS}")
     print(f"{'=' * 70}\n")
 
-    # Step 1: 모든 신호 로드
     signals = load_all_signals(data_dir)
 
     if len(signals) == 0:
-        raise ValueError("로드된 신호가 없습니다!")
+        raise ValueError("로드된 신호가 없습니다")
 
-    # Step 2: 신호 단위로 Train/Test 분할 ✅
     print(f"\n{'=' * 70}")
     print(f"{'신호 단위로 Train/Test 분할':^70}")
     print(f"{'=' * 70}")
@@ -206,14 +199,11 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
     print(f"Train 신호: {len(train_indices)}개")
     print(f"Test 신호: {len(test_indices)}개")
 
-    # Step 3: Train 데이터 생성
     print(f"\n{'=' * 70}")
     print(f"{'Train 데이터 생성':^70}")
     print(f"{'=' * 70}")
 
-    X_train_all = []
-    y_train_all = []
-    freq_train_all = []
+    X_train_all, y_train_all, freq_train_all = [], [], []
 
     for idx in train_indices:
         signal_data = signals[idx]
@@ -234,14 +224,11 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
 
     print(f"Train 데이터: {X_train.shape[0]}개 샘플 생성")
 
-    # Step 4: Test 데이터 생성
     print(f"\n{'=' * 70}")
     print(f"{'Test 데이터 생성':^70}")
     print(f"{'=' * 70}")
 
-    X_test_all = []
-    y_test_all = []
-    freq_test_all = []
+    X_test_all, y_test_all, freq_test_all = [], [], []
 
     for idx in test_indices:
         signal_data = signals[idx]
@@ -262,7 +249,6 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
 
     print(f"Test 데이터: {X_test.shape[0]}개 샘플 생성")
 
-    # Step 5: 결과 출력
     print(f"\n{'=' * 70}")
     print(f"{'데이터셋 생성 완료':^70}")
     print(f"{'=' * 70}")
@@ -283,7 +269,6 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
 
     print(f"{'=' * 70}")
 
-    # Step 6: 저장
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -296,7 +281,7 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=8192,
         test_indices=test_indices,
         resonance_freqs=RESONANCE_FREQS
     )
-    print(f"\n✓ 저장 완료: {save_path}")
+    print(f"\n저장 완료: {save_path}")
 
     return X_train, y_train, X_test, y_test
 

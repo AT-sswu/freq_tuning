@@ -1,14 +1,33 @@
 import numpy as np
 import pickle
 import pandas as pd
+import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.signal import butter, filtfilt
 from scipy.fft import fft, fftfreq
-from config import MODEL_DIR, DATA_DIR, RESONANCE_FREQS, WINDOW_SIZE, STRIDE
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report
+from matplotlib.colors import ListedColormap
+from imblearn.over_sampling import RandomOverSampler
 
+# config 파일이 없을 경우를 대비한 기본값 설정
+try:
+    from config import MODEL_DIR, DATA_DIR, RESONANCE_FREQS, WINDOW_SIZE, STRIDE
+except ImportError:
+    MODEL_DIR = "./models"
+    DATA_DIR = "./data"
+    RESONANCE_FREQS = [40, 50, 60]
+    WINDOW_SIZE = 8192
+    STRIDE = 4096
+
+
+# =========================================================
+# [1] 기본 유틸리티 함수
+# =========================================================
 
 def load_svm_model(model_path, scaler_path):
-    """SVM 모델 로드"""
+    """SVM 모델 및 스케일러 로드"""
     with open(model_path, 'rb') as f:
         model = pickle.load(f)
     with open(scaler_path, 'rb') as f:
@@ -28,32 +47,37 @@ def calculate_sample_rate(df, time_column='Time_us'):
     """샘플링 레이트 계산"""
     if time_column not in df.columns:
         time_column = df.columns[0]
+
     time_data = df[time_column].dropna().values
     time_diffs = np.diff(time_data)
     avg_time_diff_us = np.mean(time_diffs)
-    sample_rate = 1 / (avg_time_diff_us / 1_000_000)
-    return sample_rate
+
+    return 1 / (avg_time_diff_us / 1_000_000)
 
 
-def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60]):
-    """주파수 특징 추출"""
+def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS):
+    """
+    주파수 특징 추출
+    - 각 공진 주파수 ±5Hz 에너지
+    - 전체 밴드 에너지 (25~65Hz)
+    - 지배 주파수
+    """
     n = len(signal)
-    fft_vals = fft(signal)
+    fft_vals = np.abs(fft(signal))
     freqs = fftfreq(n, 1 / sample_rate)
 
-    positive_mask = freqs > 0
-    freqs = freqs[positive_mask]
-    fft_vals = np.abs(fft_vals[positive_mask])
+    mask = freqs > 0
+    freqs = freqs[mask]
+    fft_vals = fft_vals[mask]
 
     features = []
-    for target_freq in target_bands:
-        band_mask = (freqs >= target_freq - 5) & (freqs <= target_freq + 5)
-        band_energy = np.sum(fft_vals[band_mask] ** 2)
-        features.append(band_energy)
 
-    full_band_mask = (freqs >= 30) & (freqs <= 60)
-    full_band_energy = np.sum(fft_vals[full_band_mask] ** 2)
-    features.append(full_band_energy)
+    for f in target_bands:
+        band = (freqs >= f - 5) & (freqs <= f + 5)
+        features.append(np.sum(fft_vals[band] ** 2))
+
+    full_band = (freqs >= 25) & (freqs <= 65)
+    features.append(np.sum(fft_vals[full_band] ** 2))
 
     dominant_freq = freqs[np.argmax(fft_vals)]
     features.append(dominant_freq)
@@ -61,198 +85,185 @@ def extract_frequency_features(signal, sample_rate, target_bands=[30, 40, 50, 60
     return np.array(features), dominant_freq
 
 
-def assign_label(f_in, res_freqs=RESONANCE_FREQS):
-    """입력 주파수를 가장 가까운 공진 주파수 클래스로 매핑"""
-    res_array = np.array(res_freqs)
-    return np.argmin(np.abs(res_array - f_in))
+def assign_label(freq, res_freqs=RESONANCE_FREQS):
+    """가장 가까운 공진 주파수 클래스 할당"""
+    return np.argmin(np.abs(np.array(res_freqs) - freq))
 
 
-def sliding_window_split(signal, window_size=8192, stride=4096):
+def sliding_window_split(signal, window_size, stride):
     """슬라이딩 윈도우 분할"""
-    windows = []
-    for start in range(0, len(signal) - window_size + 1, stride):
-        window = signal[start:start + window_size]
-        windows.append(window)
-    return windows
+    return [
+        signal[i:i + window_size]
+        for i in range(0, len(signal) - window_size + 1, stride)
+    ]
 
 
-def process_csv_for_boundary_test(file_path, window_size=8192, stride=4096):
-    """CSV 파일에서 경계 영역 샘플만 추출"""
+# =========================================================
+# [2] CSV 처리 및 데이터 증강
+# =========================================================
+
+def process_csv_for_boundary_test(file_path, window_size, stride, show_samples=True):
+    """CSV → 경계 영역 샘플 추출"""
     df = pd.read_csv(file_path)
-
     if 'Accel_Z' not in df.columns:
         return [], [], []
 
     sample_rate = calculate_sample_rate(df)
-    signal = df['Accel_Z'].dropna().values
-    signal = butter_lowpass_filter(signal, cutoff=sample_rate / 4, fs=sample_rate)
-    windows = sliding_window_split(signal, window_size=window_size, stride=stride)
+    signal = butter_lowpass_filter(
+        df['Accel_Z'].dropna().values,
+        cutoff=sample_rate / 4,
+        fs=sample_rate
+    )
 
-    X_list = []
-    y_list = []
-    freq_list = []
+    windows = sliding_window_split(signal, window_size, stride)
 
-    for window in windows:
+    X, y, freqs = [], [], []
+    samples_shown = 0
+
+    for idx, window in enumerate(windows):
         features, input_freq = extract_frequency_features(window, sample_rate)
 
-        is_boundary = False
-        for res_freq in RESONANCE_FREQS:
-            if abs(input_freq - res_freq) <= 5:
-                is_boundary = True
-                break
-
-        if is_boundary:
+        if any(abs(input_freq - r) <= 5 for r in RESONANCE_FREQS):
+            X.append(features)
             label = assign_label(input_freq)
-            X_list.append(features)
-            y_list.append(label)
-            freq_list.append(input_freq)
+            y.append(label)
+            freqs.append(input_freq)
 
-    return X_list, y_list, freq_list
-
-
-def create_boundary_test_dataset(data_dir, window_size=8192, stride=4096):
-    """모든 CSV 파일에서 경계 영역 테스트 데이터 생성"""
-    data_path = Path(data_dir)
-    csv_files = sorted(list(data_path.glob("*.csv")))
-
-    if not csv_files:
-        raise ValueError(f"CSV 파일을 찾을 수 없습니다: {data_dir}")
-
-    print("=" * 70)
-    print("CSV 파일에서 경계 영역 테스트 데이터 생성")
-    print("=" * 70)
-    print(f"윈도우 크기: {window_size}, 이동 간격: {stride}")
-    print(f"총 CSV 파일: {len(csv_files)}개")
-    print(f"경계 영역: 각 공진 주파수 +/- 5Hz")
-    print()
-
-    all_X = []
-    all_y = []
-    all_freqs = []
-
-    for idx, file_path in enumerate(csv_files, 1):
-        X_list, y_list, freq_list = process_csv_for_boundary_test(
-            file_path, window_size=window_size, stride=stride
-        )
-        all_X.extend(X_list)
-        all_y.extend(y_list)
-        all_freqs.extend(freq_list)
-
-    X = np.array(all_X)
-    y = np.array(all_y)
-    freqs = np.array(all_freqs)
-
-    print(f"경계 영역 테스트 데이터 생성 완료: 총 {len(X)}개 샘플")
-    print(f"입력 주파수 범위: {freqs.min():.2f} ~ {freqs.max():.2f} Hz")
-    print()
-
-    print("[클래스별 경계 샘플 분포]")
-    for i, freq in enumerate(RESONANCE_FREQS):
-        count = np.sum(y == i)
-        if count > 0:
-            class_freqs = freqs[y == i]
-            print(f"  클래스 {i} ({freq}Hz): {count}개 (범위: {class_freqs.min():.2f}~{class_freqs.max():.2f}Hz)")
-    print()
+            if show_samples and samples_shown < 3:
+                print(f"\n  샘플 #{samples_shown + 1} (Window {idx})")
+                print(f"    입력 주파수: {input_freq:.2f} Hz")
+                print(f"    할당된 클래스: {label} ({RESONANCE_FREQS[label]} Hz)")
+                print(f"    특징 벡터 (처음 3개): [{features[0]:.2e}, {features[1]:.2e}, {features[2]:.2e}, ...]")
+                samples_shown += 1
 
     return X, y, freqs
 
 
-def analyze_boundary_performance(model, scaler, X, y, freqs):
-    """경계 영역 성능 분석"""
-    X_scaled = scaler.transform(X)
-    y_pred = model.predict(X_scaled)
+def generate_hard_samples(X, y, num_per_class, verbose=True):
+    """경계 근처 어려운 샘플 생성"""
+    X_hard, y_hard = [], []
+    hard_sample_details = []
 
-    results = []
-    for i in range(len(X)):
-        expected = RESONANCE_FREQS[y[i]]
-        predicted = RESONANCE_FREQS[y_pred[i]]
-        correct = (y[i] == y_pred[i])
+    if verbose:
+        print("\n[어려운 샘플 생성]")
+        print(f"  클래스당 목표 개수: {num_per_class}개")
 
-        results.append({
-            'Input_Frequency': freqs[i],
-            'Expected_Class': y[i],
-            'Expected_Frequency': expected,
-            'Predicted_Class': y_pred[i],
-            'Predicted_Frequency': predicted,
-            'Error': predicted - expected,
-            'Correct': correct
-        })
+    for class_idx in range(len(RESONANCE_FREQS)):
+        class_samples = X[y == class_idx]
+        if len(class_samples) == 0:
+            continue
 
-    results_df = pd.DataFrame(results)
-    accuracy = np.mean(results_df['Correct']) * 100
+        indices = np.random.choice(
+            len(class_samples),
+            size=min(num_per_class, len(class_samples)),
+            replace=True
+        )
 
-    print("=" * 70)
-    print("테스트 결과")
-    print("=" * 70)
-    print(f"전체 정확도: {accuracy:.2f}% ({results_df['Correct'].sum()}/{len(results_df)})")
-    print()
+        for idx in indices:
+            sample = class_samples[idx].copy()
+            sample *= (1 + np.random.normal(0, 0.05, size=sample.shape))
 
-    print("[주파수 대역별 정확도]")
+            if class_idx < len(RESONANCE_FREQS) - 1:
+                next_f = RESONANCE_FREQS[class_idx + 1]
+                sample[-1] = (RESONANCE_FREQS[class_idx] + next_f) / 2 + np.random.uniform(-2, 2)
+            else:
+                sample[-1] += np.random.uniform(-3, 3)
+
+            generated_freq = sample[-1]
+            true_label = assign_label(generated_freq)
+
+            X_hard.append(sample)
+            y_hard.append(true_label)
+
+            hard_sample_details.append({
+                'original_class': class_idx,
+                'original_freq': RESONANCE_FREQS[class_idx],
+                'true_class': true_label,
+                'true_freq': RESONANCE_FREQS[true_label],
+                'generated_freq': generated_freq,
+                'features': sample
+            })
+
+        if verbose:
+            print(f"  클래스 {class_idx} ({RESONANCE_FREQS[class_idx]}Hz): {len(indices)}개 생성")
+
+    return np.array(X_hard), np.array(y_hard), hard_sample_details
+
+
+def balance_and_normalize_data(X, y, verbose=True):
+    """오버샘플링 + 어려운 샘플 10% 추가"""
+    print("\n" + "=" * 60)
+    print("[데이터 밸런싱 및 증강 시작]")
+    print("=" * 60)
+
+    print("\n[원본 분포]")
     for i, freq in enumerate(RESONANCE_FREQS):
-        mask = results_df['Expected_Class'] == i
-        if mask.sum() > 0:
-            class_data = results_df[mask]
-            class_acc = class_data['Correct'].mean() * 100
-            print(f"  {freq}Hz: {class_acc:6.2f}% ({class_data['Correct'].sum():2d}/{len(class_data):2d})")
-    print()
+        print(f"  클래스 {i} ({freq}Hz): {np.sum(y == i)}개")
 
-    # 전체 결과 (처음 10개, 마지막 10개만)
-    print("[전체 테스트 결과 (처음 10개)]")
-    print(results_df[['Input_Frequency', 'Expected_Frequency',
-                      'Predicted_Frequency', 'Error', 'Correct']].head(10).to_string(index=False))
-    print("...")
-    print(results_df[['Input_Frequency', 'Expected_Frequency',
-                      'Predicted_Frequency', 'Error', 'Correct']].tail(10).to_string(index=False))
-    print()
+    ros = RandomOverSampler(random_state=42)
+    X_res, y_res = ros.fit_resample(X, y)
 
-    # 오분류 전체 출력
-    errors = results_df[~results_df['Correct']]
-    if len(errors) > 0:
-        print("[오분류 상세 분석]")
-        print(f"총 {len(errors)}개의 오분류 발생:")
-        print(errors[['Input_Frequency', 'Expected_Frequency',
-                      'Predicted_Frequency', 'Error']].to_string(index=False))
-    else:
-        print("[오분류 없음]")
-    print()
+    print("\n[오버샘플링 후]")
+    for i, freq in enumerate(RESONANCE_FREQS):
+        print(f"  클래스 {i} ({freq}Hz): {np.sum(y_res == i)}개")
 
-    return results_df, accuracy
+    samples_per_class = np.bincount(y_res)[0]
+    hard_n = int(samples_per_class * 0.1)
 
+    X_hard, y_hard, hard_details = generate_hard_samples(X_res, y_res, hard_n)
+
+    X_final = np.vstack([X_res, X_hard])
+    y_final = np.hstack([y_res, y_hard])
+
+    print("\n[최종 분포]")
+    for i, freq in enumerate(RESONANCE_FREQS):
+        print(f"  클래스 {i} ({freq}Hz): {np.sum(y_final == i)}개")
+
+    print(f"  총 샘플 수: {len(y_final)}개")
+
+    return X_final, y_final, hard_details
+
+
+# =========================================================
+# [4] 메인 실행
+# =========================================================
 
 def boundary_test_from_csv():
-    """CSV 파일에서 경계 영역 테스트 실행"""
-    model_path = f"{MODEL_DIR}/svm_model.pkl"
-    scaler_path = f"{MODEL_DIR}/svm_scaler.pkl"
+    print("\n" + "#" * 60)
+    print("SVM 경계 테스트 및 시각화")
+    print("#" * 60 + "\n")
 
-    model, scaler = load_svm_model(model_path, scaler_path)
-    print("모델 로드 완료")
-    print()
+    model_file = Path(MODEL_DIR) / "svm_model.pkl"
+    scaler_file = Path(MODEL_DIR) / "svm_scaler.pkl"
 
-    X, y, freqs = create_boundary_test_dataset(
-        data_dir=DATA_DIR,
-        window_size=WINDOW_SIZE,
-        stride=STRIDE
-    )
+    if not model_file.exists():
+        print(f"모델 파일을 찾을 수 없습니다: {model_file}")
+        return
 
-    if len(X) == 0:
-        print("경계 영역 샘플이 없습니다.")
-        return None, 0
+    model, scaler = load_svm_model(model_file, scaler_file)
+    print(f"모델 로드 완료: kernel={model.kernel}, C={model.C}, gamma={model.gamma}")
 
-    results_df, accuracy = analyze_boundary_performance(model, scaler, X, y, freqs)
+    X_raw, y_raw = [], []
+    for csv in Path(DATA_DIR).glob("*.csv"):
+        X, y, _ = process_csv_for_boundary_test(csv, WINDOW_SIZE, STRIDE)
+        X_raw.extend(X)
+        y_raw.extend(y)
 
-    save_path = Path(MODEL_DIR)
-    csv_path = save_path / "boundary_test_results.csv"
-    results_df.to_csv(csv_path, index=False)
+    if not X_raw:
+        print("분석할 데이터가 없습니다.")
+        return
 
-    print("=" * 70)
-    print("최종 결과")
-    print("=" * 70)
-    print(f"경계 영역 정확도: {accuracy:.2f}%")
-    print(f"결과 파일: {csv_path}")
-    print("=" * 70)
+    X = np.array(X_raw)
+    y = np.array(y_raw)
 
-    return results_df, accuracy
+    X_bal, y_bal, _ = balance_and_normalize_data(X, y)
+
+    X_scaled = scaler.transform(X_bal)
+    y_pred = model.predict(X_scaled)
+
+    print("\n[Classification Report]")
+    print(classification_report(y_bal, y_pred, target_names=[f"{f}Hz" for f in RESONANCE_FREQS]))
 
 
 if __name__ == "__main__":
-    results_df, accuracy = boundary_test_from_csv()
+    boundary_test_from_csv()

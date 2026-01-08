@@ -4,7 +4,7 @@ OUTPUT_DIR = "/Users/seohyeon/AT_freq_tuning/freq_tuning_svm/preprocessed_data"
 MODEL_DIR = "/Users/seohyeon/AT_freq_tuning/freq_tuning_svm/model_results"
 
 # 공진 주파수 (고정)
-RESONANCE_FREQS = [30, 40, 50, 60]
+RESONANCE_FREQS = [40, 50, 60]
 
 # 데이터 증강 설정
 WINDOW_SIZE = 8192

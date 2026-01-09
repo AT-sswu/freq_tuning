@@ -7,39 +7,26 @@ from config import DATA_DIR, OUTPUT_DIR, RESONANCE_FREQS, WINDOW_SIZE, STRIDE, T
 
 def add_gaussian_noise_with_snr(signal, snr_db):
     """SNR(dB)을 기준으로 가우시안 노이즈를 추가하여 신호 증강"""
-    # 신호 전력 계산
     signal_power = np.mean(signal ** 2)
-    
-    # SNR을 선형으로 변환
     snr_linear = 10 ** (snr_db / 10)
-    
-    # 노이즈 전력 계산
     noise_power = signal_power / snr_linear
-    
-    # 노이즈 표준편차
     noise_std = np.sqrt(noise_power)
-    
-    # 가우시안 노이즈 생성
     noise = np.random.normal(0, noise_std, len(signal))
-    
-    # 노이즈 추가
     augmented_signal = signal + noise
-    
     return augmented_signal
 
 def calculate_sample_rate(df, time_column='Time_us'):
-    """데이터 기반 샘플링 주파수 계산: 센서 데이터의 실제 수집 간격을 파악함"""
+    """데이터 기반 샘플링 주파수 계산"""
     if time_column not in df.columns:
         time_column = df.columns[0]
-    time_data = df[time_column].dropna().values  # 시간 데이터에서 결측치 제거 후 추출
-    time_diffs = np.diff(time_data)  # 인접한 샘플 사이의 시간 간격(dt)들을 계산
-    avg_time_diff_us = np.mean(time_diffs)  # 개별 샘플링 오차를 줄이기 위해 전체 간격의 평균을 사용
-    sample_rate = 1 / (avg_time_diff_us / 1_000_000)  # 마이크로초(us) 단위를 초(s)로 환산하여 1초당 샘플 수(Hz) 도출
+    time_data = df[time_column].dropna().values
+    time_diffs = np.diff(time_data)
+    avg_time_diff_us = np.mean(time_diffs)
+    sample_rate = 1 / (avg_time_diff_us / 1_000_000)
     return sample_rate
 
-
 def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS):
-    """FFT 기반 주파수 특징 추출: 목표 주파수와 그 인접 대역의 에너지를 추출"""
+    """Q-factor 기반 주파수 특징 추출 (Q=10으로 고정, ±5% 범위)"""
     n = len(signal)
     fft_vals = fft(signal)
     freqs = fftfreq(n, 1 / sample_rate)
@@ -57,25 +44,18 @@ def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS
     
     features = []
     
+    # Q-factor 기반 대역폭 정의 (Q=10 고정: ±5% 범위)
+    q_factor = 10
+    
     # 각 공진 주파수별 특징 추출
-    # 1) 좁은 대역 (±3Hz): 정확한 주파수 성분 감지
-    # 2) 넓은 대역 (±5Hz): 주변 대역 고려
-    # 3) 더 넓은 대역 (±10Hz): 광역 에너지 포함
     for target_freq in target_bands:
-        # ±3Hz 대역
-        band_mask_tight = (freqs >= target_freq - 3) & (freqs <= target_freq + 3)
-        band_energy_tight = np.sum(fft_vals_normalized[band_mask_tight] ** 2)
-        features.append(band_energy_tight)
+        # 대역폭 = target_freq / Q
+        bandwidth = target_freq / q_factor
         
-        # ±5Hz 대역
-        band_mask_mid = (freqs >= target_freq - 5) & (freqs <= target_freq + 5)
-        band_energy_mid = np.sum(fft_vals_normalized[band_mask_mid] ** 2)
-        features.append(band_energy_mid)
-        
-        # ±10Hz 대역
-        band_mask_wide = (freqs >= target_freq - 10) & (freqs <= target_freq + 10)
-        band_energy_wide = np.sum(fft_vals_normalized[band_mask_wide] ** 2)
-        features.append(band_energy_wide)
+        # ±bandwidth/2 범위 정의
+        band_mask = (freqs >= target_freq - bandwidth/2) & (freqs <= target_freq + bandwidth/2)
+        band_energy = np.sum(fft_vals_normalized[band_mask] ** 2)
+        features.append(band_energy)
     
     # 지배 주파수 (dominant frequency)
     peak_idx = np.argmax(fft_vals)
@@ -83,151 +63,256 @@ def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS
     
     return np.array(features), peak_frequency
 
-
 def assign_label(peak_frequency):
     """지배 주파수(peak_frequency)를 가장 가까운 공진 주파수로 매핑하여 클래스 할당"""
     res_array = np.array(RESONANCE_FREQS)
     label = np.argmin(np.abs(res_array - peak_frequency))
     return label
 
+def calculate_augmentation_multiplier(class_counts, strategy='balanced'):
+    """
+    클래스별 증강 배수 계산 - 각 클래스를 동일한 샘플 개수로 맞춤
+    
+    Args:
+        class_counts: 각 클래스의 샘플 개수
+        strategy: 'balanced' (모든 클래스를 최대값에 맞춤)
+    """
+    multipliers = {}
+    max_count = np.max(class_counts)
+    
+    for class_id, count in enumerate(class_counts):
+        multipliers[class_id] = max_count / count
+    
+    return multipliers
+    """주파수를 가장 가까운 공진 주파수로 매핑"""
+    res_array = np.array(RESONANCE_FREQS)
+    label = np.argmin(np.abs(res_array - peak_frequency))
+    return label
+
 def sliding_window_split(signal, window_size=512, stride=256):
-    """연속 신호를 분석 단위인 윈도우로 분할: Stride를 작게 주어 윈도우 간 Overlap(중첩) 발생 가능"""
+    """윈도우 분할"""
     windows = [] 
-    # 신호의 시작부터 끝까지 지정된 보폭(Stride)만큼 건너뛰며 데이터를 슬라이싱함
     for start in range(0, len(signal) - window_size + 1, stride):
         window = signal[start:start + window_size]
         windows.append(window)
     return windows
 
 def process_single_signal(signal, sample_rate, window_size, stride, file_name, snr_db=None):
-    """단일 파일에서 읽어온 신호 전처리 및 특징 추출 파이프라인 수행"""
+    """신호 전처리 및 특징 추출"""
     windows = sliding_window_split(signal, window_size=window_size, stride=stride)
-
     X_list, y_list = [], []
-    freq_list = []  # 입력 주파수 추적
-    snr_list = []  # SNR 메타데이터 추적
+    freq_list = []
+    snr_list = []
 
     for window in windows:
         features, peak_frequency = extract_frequency_features(window, sample_rate)
         label = assign_label(peak_frequency)
-
         X_list.append(features)
         y_list.append(label)
-        freq_list.append(peak_frequency)  # 입력 주파수 저장
+        freq_list.append(peak_frequency)
         snr_list.append(snr_db)
 
     return X_list, y_list, freq_list, snr_list
 
 def load_all_signals(data_dir):
-    """지정된 경로의 모든 CSV 파일을 읽어와 물리적 의미가 있는 신호 객체로 변환"""
+    """CSV 파일 로드"""
     data_path = Path(data_dir)
     csv_files = sorted(list(data_path.glob("*.csv")))
-
     signals = []
 
     for idx, file_path in enumerate(csv_files):
         try:
             df = pd.read_csv(file_path)
             if 'Accel_Z' not in df.columns: continue
-
             sample_rate = calculate_sample_rate(df)
             signal = df['Accel_Z'].dropna().values
-
-            # 원본 신호 추가
             signals.append({
                 'signal': signal,
                 'sample_rate': sample_rate,
                 'file_name': file_path.name,
-                'signal_id': idx,  # 파일 단위 분할을 위해 고유 ID 부여
+                'signal_id': idx,
                 'is_augmented': False,
                 'snr_db': None
             })
-
-            # 데이터 증강 적용 (SNR 기반 가우시안 노이즈)
-            if ENABLE_AUGMENTATION:
-                for snr_db in AUGMENTATION_SNR_DB:
-                    augmented_signal = add_gaussian_noise_with_snr(signal, snr_db)
-                    signals.append({
-                        'signal': augmented_signal,
-                        'sample_rate': sample_rate,
-                        'file_name': f"{file_path.name}_aug_SNR{snr_db}dB",
-                        'signal_id': idx,  # 동일 파일 그룹으로 유지 (데이터 누수 방지)
-                        'is_augmented': True,
-                        'snr_db': snr_db
-                    })
         except Exception:
             continue
     return signals
 
+def calculate_augmentation_multiplier(class_counts, strategy='balanced'):
+    """
+    클래스 불균형 기반 증강 배수 계산 (더 강력한 버전)
+    
+    Args:
+        class_counts: 각 클래스의 샘플 개수
+        strategy: 'balanced' (모든 클래스를 최대값에 맞춤 - 더 공격적)
+    """
+    multipliers = {}
+    max_count = np.max(class_counts)
+    
+    for class_id, count in enumerate(class_counts):
+        # 모든 클래스를 최대값에 맞춤 (더 공격적인 오버샘플링)
+        multipliers[class_id] = max_count / count
+    
+    return multipliers
+
 def create_classification_dataset_fixed(data_dir, output_dir, window_size=WINDOW_SIZE,
                                         stride=STRIDE, test_size=TEST_SIZE, random_state=RANDOM_STATE):
                                         
-    """[핵심 로직] 데이터 누수 방지를 고려한 학습/테스트 데이터셋 통합 생성 함수"""
+    """클래스별 균등 증강을 적용한 학습/테스트 데이터셋 생성 함수"""
     signals = load_all_signals(data_dir)
 
-    # 데이터 누수(Data Leakage) 방지: 윈도우 단위로 섞으면 동일 파일의 파편이 Train/Test에 동시에 들어감
-    # 이를 막기 위해 파일(Signal ID) 자체를 먼저 분리한 후, 분리된 그룹 내에서만 윈도우를 추출함
     signal_indices = np.arange(len(signals))
-    train_indices, test_indices = train_test_split(
-        signal_indices, test_size=test_size, random_state=random_state
-    )
+    
+    # 각 신호의 대표 주파수를 먼저 계산하여 클래스 레이블 결정 (Stratified Sampling용)
+    signal_labels = []
+    for signal_data in signals:
+        windows = sliding_window_split(signal_data['signal'], window_size=window_size, stride=256)
+        if len(windows) > 0:
+            _, peak_freq = extract_frequency_features(windows[0], signal_data['sample_rate'])
+            label = assign_label(peak_freq)
+            signal_labels.append(label)
+        else:
+            signal_labels.append(0)
+    
+    # Stratified Sampling: 클래스별로 균형 있게 Train/Test 분리 (파일 개수가 너무 적으면 Random으로 변경)
+    signal_labels_array = np.array(signal_labels)
+    class_counts_signals = np.bincount(signal_labels_array)
+    
+    # 클래스별 파일이 2개 미만이면 Random Split 사용
+    min_count = np.min(class_counts_signals)
+    if min_count >= 2:
+        train_indices, test_indices = train_test_split(
+            signal_indices, test_size=test_size, random_state=random_state, stratify=signal_labels_array
+        )
+    else:
+        # Random Split (Stratified 불가)
+        print(f"경고: 일부 클래스의 파일이 2개 미만이어서 Random Split 사용합니다 (최소값: {min_count})")
+        train_indices, test_indices = train_test_split(
+            signal_indices, test_size=test_size, random_state=random_state
+        )
 
     X_train_all, y_train_all = [], []
-    freq_train_all = []  # 입력 주파수 추적
-    snr_train_all = []  # 훈련 데이터 SNR 메타데이터
+    freq_train_all = []
+    snr_train_all = []
+    
+    # 1단계: 원본 훈련 데이터 수집
+    print("[단계 1] 원본 훈련 데이터 수집 중...")
     for idx in train_indices:
         signal_data = signals[idx]
         X_list, y_list, freq_list, snr_list = process_single_signal(
-            signal_data['signal'], signal_data['sample_rate'], window_size, stride, signal_data['file_name'], signal_data['snr_db']
+            signal_data['signal'], signal_data['sample_rate'], window_size, stride, signal_data['file_name'], None
         )
-        X_train_all.extend(X_list); y_train_all.extend(y_list)
+        X_train_all.extend(X_list)
+        y_train_all.extend(y_list)
         freq_train_all.extend(freq_list)
         snr_train_all.extend(snr_list)
 
+    # 2단계: 클래스 불균형 분석
+    y_train_temp = np.array(y_train_all)
+    class_counts = np.bincount(y_train_temp, minlength=len(RESONANCE_FREQS))
+    print(f"\n[증강 전 훈련 레이블 분포]")
+    for class_id, count in enumerate(class_counts):
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count} 샘플")
+    
+    # 3단계: 클래스별 균등 증강 배수 계산
+    augmentation_multipliers = calculate_augmentation_multiplier(class_counts, strategy='balanced')
+    print(f"\n[클래스별 증강 배수 (모두 최대값으로 정렬)]")
+    for class_id, multiplier in augmentation_multipliers.items():
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {multiplier:.2f}배")
+    
+    # 4단계: SNR 기반 클래스별 균등 증강
+    if ENABLE_AUGMENTATION:
+        print(f"\n[단계 2] SNR 기반 클래스별 균등 증강 중...")
+        
+        # 훈련 신호들을 클래스별로 분류
+        signal_class_map = {}
+        for array_idx, file_idx in enumerate(train_indices):
+            signal_data = signals[file_idx]
+            X_list, y_list, _, _ = process_single_signal(
+                signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
+                signal_data['file_name'], None
+            )
+            if len(y_list) > 0:
+                signal_class = np.bincount(y_list).argmax()
+                if signal_class not in signal_class_map:
+                    signal_class_map[signal_class] = []
+                signal_class_map[signal_class].append(file_idx)
+        
+        # 각 클래스별로 배수만큼 증강
+        for class_id, file_indices in signal_class_map.items():
+            multiplier = augmentation_multipliers[class_id]
+            # 배수만큼 SNR 기반 증강 반복
+            augment_count = int(np.ceil((multiplier - 1) * len(file_indices)))
+            print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {augment_count}개 파일 증강")
+            
+            for _ in range(augment_count):
+                for file_idx in file_indices:
+                    signal_data = signals[file_idx]
+                    for snr_db in AUGMENTATION_SNR_DB:
+                        augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_db)
+                        X_aug, y_aug, freq_aug, snr_aug = process_single_signal(
+                            augmented_signal, signal_data['sample_rate'], window_size, stride,
+                            f"{signal_data['file_name']}_aug_SNR{snr_db}dB",
+                            snr_db
+                        )
+                        X_train_all.extend(X_aug)
+                        y_train_all.extend(y_aug)
+                        freq_train_all.extend(freq_aug)
+                        snr_train_all.extend(snr_aug)
+
+    # 테스트 데이터 (증강 없음)
+    print(f"\n[단계 3] 테스트 데이터 수집 중...")
     X_test_all, y_test_all = [], []
-    freq_test_all = []  # 입력 주파수 추적
-    snr_test_all = []  # 테스트 데이터 SNR 메타데이터
+    freq_test_all = []
+    snr_test_all = []
+    
     for idx in test_indices:
         signal_data = signals[idx]
-
-        # 테스트 셋은 학습 셋에서 보지 못한 독립적인 파일(신호)들로 구성됨
         X_list, y_list, freq_list, snr_list = process_single_signal(
-            signal_data['signal'], signal_data['sample_rate'], window_size, stride, signal_data['file_name'], signal_data['snr_db']
+            signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
+            signal_data['file_name'], signal_data['snr_db']
         )
-        X_test_all.extend(X_list); y_test_all.extend(y_list)
+        X_test_all.extend(X_list)
+        y_test_all.extend(y_list)
         freq_test_all.extend(freq_list)
         snr_test_all.extend(snr_list)
 
-    # 머신러닝 모델의 입력을 위해 최종 데이터를 넘파이 행렬 형태로 변환
+    # 최종 데이터 정리
     X_train, y_train = np.array(X_train_all), np.array(y_train_all)
-    X_train = X_train.reshape(X_train.shape[0], -1)  # 2D로 강제 변환
+    X_train = X_train.reshape(X_train.shape[0], -1)
     X_test, y_test = np.array(X_test_all), np.array(y_test_all)
-    X_test = X_test.reshape(X_test.shape[0], -1)  # 2D로 강제 변환
+    X_test = X_test.reshape(X_test.shape[0], -1)
     
-    # 입력 주파수 및 SNR 메타데이터도 배열로 변환
     freq_train = np.array(freq_train_all)
     freq_test = np.array(freq_test_all)
     snr_train = np.array(snr_train_all)
     snr_test = np.array(snr_test_all)
     
-    # 레이블 분포 확인 (디버깅용)
-    print(f"훈련 레이블 분포: {np.bincount(y_train)}")
-    print(f"테스트 레이블 분포: {np.bincount(y_test)}")
+    # 최종 분포 확인
+    print(f"\n[증강 후 최종 훈련 레이블 분포]")
+    y_train_counts = np.bincount(y_train, minlength=len(RESONANCE_FREQS))
+    for class_id, count in enumerate(y_train_counts):
+        ratio = count / np.sum(y_train_counts) * 100
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count} 샘플 ({ratio:.1f}%)")
+    
+    print(f"\n[테스트 레이블 분포]")
+    y_test_counts = np.bincount(y_test, minlength=len(RESONANCE_FREQS))
+    for class_id, count in enumerate(y_test_counts):
+        ratio = count / np.sum(y_test_counts) * 100
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count} 샘플 ({ratio:.1f}%)")
     
     return X_train, y_train, X_test, y_test, freq_train, freq_test, snr_train, snr_test
 
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("FFT 기반 데이터 전처리 시작")
+    print("강력한 클래스 불균형 처리 FFT 데이터 전처리 시작")
     print("=" * 70)
     
-    # 데이터셋 생성
     X_train, y_train, X_test, y_test, freq_train, freq_test, snr_train, snr_test = \
-        create_classification_dataset_fixed(DATA_DIR, OUTPUT_DIR)
+        create_classification_dataset_fixed(DATA_DIR, OUTPUT_DIR, WINDOW_SIZE, STRIDE)
     
     print("\n[데이터셋 생성 완료]")
     print(f"훈련 데이터: X_train={X_train.shape}, y_train={y_train.shape}")
     print(f"테스트 데이터: X_test={X_test.shape}, y_test={y_test.shape}")
     print(f"입력 주파수: freq_train={freq_train.shape}, freq_test={freq_test.shape}")
-

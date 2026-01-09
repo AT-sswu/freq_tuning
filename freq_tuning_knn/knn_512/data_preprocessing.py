@@ -64,7 +64,17 @@ def extract_frequency_features(signal, sample_rate, target_bands=RESONANCE_FREQS
     return np.array(features), peak_frequency
 
 def assign_label(peak_frequency):
-    """지배 주파수(peak_frequency)를 가장 가까운 공진 주파수로 매핑하여 클래스 할당"""
+    """
+    지배 주파수를 가장 가까운 공진 주파수로 매핑하여 클래스 할당
+    
+    관성 지배 영역 이론 적용:
+    - 입력 주파수 > 고유 주파수: 관성 지배 영역 (w > ωn)
+    - 입력 주파수 < 고유 주파수: 강성 지배 영역 (w < ωn)
+    
+    예:
+    - 45Hz (40과 50의 중간) → 40Hz로 매핑 (첫번째 최솟값)
+    - 55Hz (50과 60의 중간) → 50Hz로 매핑 (첫번째 최솟값)
+    """
     res_array = np.array(RESONANCE_FREQS)
     label = np.argmin(np.abs(res_array - peak_frequency))
     return label

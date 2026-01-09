@@ -1,7 +1,7 @@
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, precision_recall_fscore_support
 import joblib
 from pathlib import Path
 from data_preprocessing import create_classification_dataset_fixed
@@ -53,6 +53,27 @@ def train_knn_model():
     print("=" * 70)
     print(classification_report(y_test, y_pred, target_names=['40Hz', '50Hz', '60Hz']))
 
+    # 클래스별 상세 지표 계산
+    print("=" * 70)
+    print("클래스별 상세 지표 (따로 계산)")
+    print("=" * 70)
+    cm = confusion_matrix(y_test, y_pred)
+    precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred)
+    
+    class_names = ['40Hz', '50Hz', '60Hz']
+    print(f"\n{'클래스':<10} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
+    print("-" * 80)
+    
+    for i, class_name in enumerate(class_names):
+        class_accuracy = cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0
+        print(f"{class_name:<10} {class_accuracy:<12.4f} {precision[i]:<12.4f} {recall[i]:<12.4f} {f1[i]:<12.4f} {support[i]:<10}")
+    
+    weighted_accuracy = np.average([cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0 for i in range(3)], 
+                                    weights=support)
+    print("-" * 80)
+    print(f"{'가중평균':<10} {weighted_accuracy:<12.4f} {np.average(precision, weights=support):<12.4f} {np.average(recall, weights=support):<12.4f} {np.average(f1, weights=support):<12.4f} {support.sum():<10}")
+    print()
+
     # SNR별 성능 계산
     print("=" * 70)
     print("SNR별 성능 분석")
@@ -95,6 +116,22 @@ def train_knn_model():
         f.write(f"테스트 정확도: {test_accuracy:.4f}\n\n")
         f.write("[분류 보고서]\n")
         f.write(classification_report(y_test, y_pred, target_names=['40Hz', '50Hz', '60Hz']))
+        
+        # 클래스별 상세 지표 저장
+        f.write("\n" + "=" * 70 + "\n")
+        f.write("클래스별 상세 지표 (따로 계산)\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"{'클래스':<10} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}\n")
+        f.write("-" * 80 + "\n")
+        
+        for i, class_name in enumerate(class_names):
+            class_accuracy = cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0
+            f.write(f"{class_name:<10} {class_accuracy:<12.4f} {precision[i]:<12.4f} {recall[i]:<12.4f} {f1[i]:<12.4f} {support[i]:<10}\n")
+        
+        f.write("-" * 80 + "\n")
+        weighted_accuracy = np.average([cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0 for i in range(3)], 
+                                        weights=support)
+        f.write(f"{'가중평균':<10} {weighted_accuracy:<12.4f} {np.average(precision, weights=support):<12.4f} {np.average(recall, weights=support):<12.4f} {np.average(f1, weights=support):<12.4f} {support.sum():<10}\n")
         f.write("\n" + "=" * 70 + "\n")
     print(f"✓ 결과 저장: {results_path}\n")
 

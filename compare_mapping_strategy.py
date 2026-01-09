@@ -1,71 +1,178 @@
 """
-Energy Harvester Simulation: Comparison of Pre/Post Mapping Strategies
+Energy Harvester Simulation: Generalized Linear Array VEH Power Comparison
 
-Power generation based on resonance frequency:
-- Input frequency closer to resonance frequency -> higher power
-- Simulate peak frequency input to 3 resonant harvesters (40, 50, 60Hz)
+Compares pre-mapping (raw frequency) vs post-mapping (ML model predicted frequency)
+using 1-DOF VEH power formula with frequency response function.
+
+Power Formula:
+P(ω_input, ω_res) = [m * Y² * ω_input⁵ / (4 * ζ_tot² * ω_res⁴)] * |H(ω_input/ω_res)|²
+where |H(r)| = 1 / √[(1-r²)² + (2ζ r)²], r = ω_input/ω_res
 """
 
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.fft import fft, fftfreq
+import joblib
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.style.use('seaborn-v0_8-darkgrid')
 
 
-def calculate_theoretical_power(acceleration_amplitude, frequency, 
-                                resonance_freq,
-                                mass=0.001,  # 1g (kg)
-                                zeta_e=0.01,  # electrical damping ratio
-                                zeta_m=0.01,  # mechanical damping ratio
-                                scale_factor=1e6):
+def calculate_veh_power(frequency, resonance_freq, 
+                        mass=0.001, Y=0.1, Q_factor=10, scale_factor=1e6):
     """
-    Theoretical power calculation based on paper Equation (5) with resonance frequency response
+    Generalized 1-DOF VEH Power Calculation using Frequency Response Function
     
-    P = (m·ζe·A²·ω²) / (4·ωn·ζT²·[(ωn² - ω²)² + (2·ζT·ωn·ω)²])
+    Power Formula:
+    P(ω_input, ω_res) = [m * Y² * ω_input⁵ / (4 * ζ_tot² * ω_res⁴)] * |H(r)|²
     
-    At resonance (ω ≈ ωn): power is maximized
+    where:
+    - |H(r)| = 1 / √[(1-r²)² + (2ζ r)²]
+    - r = ω_input / ω_res (frequency ratio)
+    - ζ_tot = 1 / (2 * Q_factor) (derived from Q factor)
     
     Parameters:
     -----------
-    acceleration_amplitude : float
-        Acceleration amplitude A (m/s²)
     frequency : float
-        Input frequency f (Hz) - measured actual frequency from sensor
+        Input frequency (Hz)
     resonance_freq : float
-        Harvester resonance frequency fn (Hz) - one of 40, 50, 60
+        Harvester resonance frequency (Hz)
     mass : float
-        Harvester mass m (kg), default 1g
-    zeta_e : float
-        Electrical damping ratio ζe (dimensionless), paper recommends = ζm
-    zeta_m : float
-        Mechanical damping ratio ζm (dimensionless), paper measured value 0.01
+        Harvester mass (kg), default 1g
+    Y : float
+        Displacement amplitude (m), default 0.1m
+    Q_factor : float
+        Quality factor (dimensionless), default 10
     scale_factor : float
-        Output unit conversion (1e6: μW, 1e3: mW, 1: W)
+        Unit conversion factor (1e6 → μW)
     
     Returns:
     --------
     power : float
-        Expected output power (μW)
+        Output power (μW)
     """
-    omega = 2 * np.pi * frequency  # input angular frequency (rad/s)
-    omega_n = 2 * np.pi * resonance_freq  # resonance angular frequency (rad/s)
-    zeta_T = zeta_e + zeta_m  # total damping ratio
-    
-    if omega_n == 0 or zeta_T == 0:
+    if frequency <= 0 or resonance_freq <= 0:
         return 0.0
     
-    # frequency response function (maximum at resonance)
-    freq_response_denominator = (omega_n**2 - omega**2)**2 + (2 * zeta_T * omega_n * omega)**2
+    # Angular frequencies
+    omega = 2 * np.pi * frequency
+    omega_n = 2 * np.pi * resonance_freq
     
-    if freq_response_denominator == 0:
+    # Damping ratio from Q factor
+    zeta_tot = 1 / (2 * Q_factor)
+    
+    # Frequency ratio
+    r = omega / omega_n
+    
+    # Frequency response magnitude |H(r)|
+    numerator = (1 - r**2)**2 + (2 * zeta_tot * r)**2
+    if numerator == 0:
         return 0.0
     
-    # power formula: power increases as input frequency approaches resonance frequency
-    power = (mass * zeta_e * acceleration_amplitude**2 * omega**2) / \
-            (4 * omega_n * zeta_T**2 * freq_response_denominator)
+    H_magnitude_squared = 1 / numerator
+    
+    # Power formula: P = [m * Y² * ω^5 / (4 * ζ²_tot * ω_n^4)] * |H(r)|²
+    power_coefficient = (mass * Y**2 * omega**5) / (4 * zeta_tot**2 * omega_n**4)
+    power = power_coefficient * H_magnitude_squared
     
     return power * scale_factor  # convert to μW
+
+
+def load_ml_models():
+    """
+    Load trained ML models (RF, SVM, KNN) from workspace using pickle or joblib
+    Returns dict of {model_name: (model, scaler)}
+    """
+    models = {}
+    workspace_root = Path(__file__).parent
+    
+    model_configs = {
+        'SVM': [
+            workspace_root / 'freq_tuning_svm' / 'svm_512' / 'model_results' / 'svm_model.joblib',
+            workspace_root / 'freq_tuning_svm' / 'svm_512' / 'model_results' / 'svm_model.pkl',
+        ],
+        'RF': [
+            workspace_root / 'freq_tuning_rf' / 'rf_512' / 'model_results' / 'rf_model.joblib',
+            workspace_root / 'freq_tuning_rf' / 'rf_512' / 'model_results' / 'rf_model.pkl',
+        ],
+        'KNN': [
+            workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'knn_model.joblib',
+            workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'knn_model.pkl',
+        ],
+    }
+    
+    scaler_configs = {
+        'SVM': [
+            workspace_root / 'freq_tuning_svm' / 'svm_512' / 'model_results' / 'scaler.joblib',
+            workspace_root / 'freq_tuning_svm' / 'svm_512' / 'model_results' / 'scaler.pkl',
+        ],
+        'RF': [
+            workspace_root / 'freq_tuning_rf' / 'rf_512' / 'model_results' / 'scaler.joblib',
+            workspace_root / 'freq_tuning_rf' / 'rf_512' / 'model_results' / 'scaler.pkl',
+        ],
+        'KNN': [
+            workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'scaler.joblib',
+            workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'scaler.pkl',
+        ],
+    }
+    
+    for model_name, model_paths in model_configs.items():
+        model = None
+        model_file = None
+        
+        # Try to find and load model
+        for path in model_paths:
+            if path.exists():
+                try:
+                    model = joblib.load(path)
+                    model_file = path
+                    break
+                except:
+                    continue
+        
+        if model is None:
+            print(f"  ⊘ {model_name} model not found in any location")
+            continue
+        
+        # Try to load scaler
+        scaler = None
+        for path in scaler_configs[model_name]:
+            if path.exists():
+                try:
+                    scaler = joblib.load(path)
+                    break
+                except:
+                    continue
+        
+        models[model_name] = (model, scaler)
+        print(f"  ✓ Loaded {model_name} model from {model_file.name}")
+    
+    return models
+
+
+def predict_resonance_frequency(features, model, scaler, resonance_freqs=[40, 50, 60]):
+    """
+    Predict resonance frequency using ML model
+    """
+    try:
+        features_2d = features.reshape(1, -1)
+        
+        if scaler is not None:
+            features_2d = scaler.transform(features_2d)
+        
+        # Predict class index
+        predicted_idx = model.predict(features_2d)[0]
+        predicted_freq = resonance_freqs[int(predicted_idx)]
+        
+        return predicted_freq
+    except Exception as e:
+        # Fallback: return nearest resonance frequency
+        return resonance_freqs[np.argmax(features)]
 
 
 def extract_frequency_features_with_peak(signal, sample_rate, target_bands=[40, 50, 60]):
@@ -121,11 +228,12 @@ def sliding_window_split(signal, window_size=512, stride=256):
     return windows
 
 
-def analyze_csv_file(csv_path, window_size=512, stride=256, resonance_freqs=[40, 50, 60]):
+def analyze_csv_file_with_models(csv_path, window_size=512, stride=256, 
+                                   ml_models=None, resonance_freqs=[40, 50, 60]):
     """
-    Single CSV file analysis:
+    Single CSV file analysis with ML model predictions
     - Pre-mapping: use peak frequency directly
-    - Post-mapping: map to nearest resonance frequency
+    - Post-mapping: use ML models (SVM/RF/KNN) to predict resonance frequency
     """
     try:
         df = pd.read_csv(csv_path)
@@ -147,55 +255,50 @@ def analyze_csv_file(csv_path, window_size=512, stride=256, resonance_freqs=[40,
             
             # === Pre-mapping: use peak frequency directly ===
             powers_before = [
-                calculate_theoretical_power(
-                    acceleration_amplitude=1.0,  # normalized acceleration
+                calculate_veh_power(
                     frequency=peak_freq,
                     resonance_freq=res_freq
                 )
                 for res_freq in resonance_freqs
             ]
-            label_before = np.argmax(powers_before)
+            label_before_idx = np.argmax(powers_before)
+            label_before = resonance_freqs[label_before_idx]
             
-            # === Post-mapping: map to nearest resonance frequency ===
-            res_array = np.array(resonance_freqs)
-            mapped_freq = res_array[np.argmin(np.abs(res_array - peak_freq))]
-            label_after = np.argmin(np.abs(res_array - peak_freq))
-            
-            powers_after = [
-                calculate_theoretical_power(
-                    acceleration_amplitude=1.0,
-                    frequency=mapped_freq,  # mapped frequency
-                    resonance_freq=res_freq
-                )
-                for res_freq in resonance_freqs
-            ]
-            
-            results.append({
+            result_row = {
                 'window_idx': win_idx,
                 'peak_freq_original': peak_freq,
-                'mapped_freq': mapped_freq,
-                'freq_error': abs(peak_freq - mapped_freq),
-                
-                # Pre-mapping power
                 'power_before_40Hz': powers_before[0],
                 'power_before_50Hz': powers_before[1],
                 'power_before_60Hz': powers_before[2],
-                'label_before': resonance_freqs[label_before],
-                'label_before_idx': label_before,
+                'label_before': label_before,
                 'max_power_before': max(powers_before),
-                
-                # Post-mapping power
-                'power_after_40Hz': powers_after[0],
-                'power_after_50Hz': powers_after[1],
-                'power_after_60Hz': powers_after[2],
-                'label_after': resonance_freqs[label_after],
-                'label_after_idx': label_after,
-                'max_power_after': max(powers_after),
-                
-                # Comparison
-                'label_match': label_before == label_after,
-                'power_improvement': max(powers_after) - max(powers_before),
-            })
+            }
+            
+            # === Post-mapping: ML model predictions ===
+            if ml_models:
+                for model_name, (model, scaler) in ml_models.items():
+                    # Predict resonance frequency
+                    mapped_freq = predict_resonance_frequency(
+                        features, model, scaler, resonance_freqs
+                    )
+                    
+                    # Calculate powers with mapped frequency
+                    powers_after = [
+                        calculate_veh_power(
+                            frequency=mapped_freq,
+                            resonance_freq=res_freq
+                        )
+                        for res_freq in resonance_freqs
+                    ]
+                    
+                    result_row[f'{model_name}_mapped_freq'] = mapped_freq
+                    result_row[f'{model_name}_power_40Hz'] = powers_after[0]
+                    result_row[f'{model_name}_power_50Hz'] = powers_after[1]
+                    result_row[f'{model_name}_power_60Hz'] = powers_after[2]
+                    result_row[f'{model_name}_max_power'] = max(powers_after)
+                    result_row[f'{model_name}_improvement'] = max(powers_after) - max(powers_before)
+            
+            results.append(result_row)
         
         return pd.DataFrame(results)
     
@@ -204,22 +307,28 @@ def analyze_csv_file(csv_path, window_size=512, stride=256, resonance_freqs=[40,
         return None
 
 
-def analyze_folder(folder_path, model_name="Model", window_size=512, stride=256):
+def analyze_folder_with_models(folder_path, window_size=512, stride=256, ml_models=None):
     """
-    Analyze all CSV files in folder and generate summary statistics
+    Analyze all CSV files in folder with ML model predictions
     """
     data_path = Path(folder_path)
     csv_files = sorted(list(data_path.glob("*.csv")))
     
     all_results = []
+    resonance_freqs = [40, 50, 60]
     
     print(f"\n{'='*80}")
-    print(f"Analysis: {model_name}")
+    print(f"Analysis: Generalized VEH Power with ML Models")
     print(f"{'='*80}")
+    print(f"Models loaded: {list(ml_models.keys()) if ml_models else 'None'}")
+    print(f"Resonance frequencies: {resonance_freqs}")
+    print(f"FFT window size: {window_size}, stride: {stride}\n")
     
     for csv_file in csv_files:
         print(f"  Processing: {csv_file.name}...", end=" ")
-        df_result = analyze_csv_file(csv_file, window_size, stride)
+        df_result = analyze_csv_file_with_models(
+            csv_file, window_size, stride, ml_models, resonance_freqs
+        )
         
         if df_result is not None:
             df_result['file_name'] = csv_file.name
@@ -235,59 +344,191 @@ def analyze_folder(folder_path, model_name="Model", window_size=512, stride=256)
     # Combined statistics
     combined_df = pd.concat(all_results, ignore_index=True)
     
-    print(f"\n[Overall Statistics]")
-    print(f"  Total windows: {len(combined_df)}")
-    print(f"  Total files: {len(csv_files)}")
+    # Print statistics
+    print(f"\n{'='*80}")
+    print(f"[OVERALL STATISTICS]")
+    print(f"{'='*80}")
+    print(f"Total windows: {len(combined_df)}")
+    print(f"Total files: {len(csv_files)}")
     
-    # Label distribution pre/post mapping
-    print(f"\n[Label Distribution - Pre-Mapping]")
-    label_dist_before = combined_df['label_before'].value_counts().sort_index()
-    for label, count in label_dist_before.items():
-        ratio = count / len(combined_df) * 100
-        print(f"  {int(label)}Hz: {count:5d} ({ratio:5.1f}%)")
-    
-    print(f"\n[Label Distribution - Post-Mapping]")
-    label_dist_after = combined_df['label_after'].value_counts().sort_index()
-    for label, count in label_dist_after.items():
-        ratio = count / len(combined_df) * 100
-        print(f"  {int(label)}Hz: {count:5d} ({ratio:5.1f}%)")
-    
-    # Mapping consistency
-    match_count = combined_df['label_match'].sum()
-    match_ratio = match_count / len(combined_df) * 100
-    print(f"\n[Label Changes]")
-    print(f"  Mapping unchanged: {match_count:5d} ({match_ratio:5.1f}%)")
-    print(f"  Mapping changed: {len(combined_df) - match_count:5d} ({100-match_ratio:5.1f}%)")
-    
-    # Power comparison
+    print(f"\n[PRE-MAPPING POWER (Raw Frequency)]")
     avg_power_before = combined_df['max_power_before'].mean()
-    avg_power_after = combined_df['max_power_after'].mean()
-    improvement = avg_power_after - avg_power_before
-    improvement_ratio = (improvement / avg_power_before * 100) if avg_power_before > 0 else 0
+    print(f"  Average max power: {avg_power_before:12.2f} μW")
+    print(f"  Min power: {combined_df['max_power_before'].min():12.2f} μW")
+    print(f"  Max power: {combined_df['max_power_before'].max():12.2f} μW")
+    print(f"  Std power: {combined_df['max_power_before'].std():12.2f} μW")
     
-    print(f"\n[Power Comparison]")
-    print(f"  Average max power (pre-mapping): {avg_power_before:12.2f} μW")
-    print(f"  Average max power (post-mapping): {avg_power_after:12.2f} μW")
-    print(f"  Power improvement: {improvement:12.2f} μW ({improvement_ratio:+.1f}%)")
-    
-    # Frequency mapping error
-    avg_freq_error = combined_df['freq_error'].mean()
-    max_freq_error = combined_df['freq_error'].max()
-    print(f"\n[Frequency Mapping Error]")
-    print(f"  Average error: {avg_freq_error:.2f} Hz")
-    print(f"  Maximum error: {max_freq_error:.2f} Hz")
-    
-    # Detailed comparison - first 5 windows
-    print(f"\n[Detailed Comparison - First 5 Windows]")
-    print(f"{'idx':<4} {'peak(Hz)':<10} {'mapped(Hz)':<10} {'error':<6} {'pre':<8} {'post':<8} {'change':<8}")
-    print(f"{'-'*70}")
-    
-    for idx, row in combined_df.head(5).iterrows():
-        change = "●" if row['label_match'] else "○"
-        print(f"{idx:<4} {row['peak_freq_original']:<10.2f} {row['mapped_freq']:<10.0f} "
-              f"{row['freq_error']:<6.2f} {row['label_before']:<8.0f} {row['label_after']:<8.0f} {change:<8}")
+    if ml_models:
+        for model_name in ml_models.keys():
+            print(f"\n[POST-MAPPING POWER ({model_name})]")
+            col_name = f'{model_name}_max_power'
+            if col_name in combined_df.columns:
+                avg_power_after = combined_df[col_name].mean()
+                improvement = avg_power_after - avg_power_before
+                improvement_ratio = (improvement / avg_power_before * 100) if avg_power_before > 0 else 0
+                
+                print(f"  Average max power: {avg_power_after:12.2f} μW")
+                print(f"  Min power: {combined_df[col_name].min():12.2f} μW")
+                print(f"  Max power: {combined_df[col_name].max():12.2f} μW")
+                print(f"  Std power: {combined_df[col_name].std():12.2f} μW")
+                print(f"  Power improvement: {improvement:12.2f} μW ({improvement_ratio:+.1f}%)")
     
     return combined_df
+
+
+def generate_visualizations(results_df, ml_models, output_path):
+    """
+    Generate 4 visualization graphs as requested
+    """
+    if results_df is None or len(results_df) == 0:
+        print("No results to visualize")
+        return
+    
+    plt.style.use('seaborn-v0_8-darkgrid')
+    resonance_freqs = [40, 50, 60]
+    model_names = list(ml_models.keys()) if ml_models else []
+    
+    # ========== Graph 1: Power Comparison (Pre vs Post) ==========
+    fig1, ax = plt.subplots(figsize=(10, 6))
+    
+    categories = [f'{freq}Hz' for freq in resonance_freqs]
+    x = np.arange(len(categories))
+    width = 0.15
+    
+    # Pre-mapping (aggregated)
+    pre_powers = [
+        results_df['power_before_40Hz'].mean(),
+        results_df['power_before_50Hz'].mean(),
+        results_df['power_before_60Hz'].mean(),
+    ]
+    
+    # Plot pre-mapping
+    ax.bar(x - width/2 - width, pre_powers, width, label='Pre-Mapping (Raw)', alpha=0.85, color='#FF6B6B')
+    
+    # Plot post-mapping for each model
+    colors = ['#4ECDC4', '#45B7D1', '#FFA07A']
+    for idx, model_name in enumerate(model_names):
+        post_powers = [
+            results_df[f'{model_name}_power_40Hz'].mean(),
+            results_df[f'{model_name}_power_50Hz'].mean(),
+            results_df[f'{model_name}_power_60Hz'].mean(),
+        ]
+        ax.bar(x + (idx - len(model_names)/2) * width + width, post_powers, width, 
+               label=f'Post-Mapping ({model_name})', alpha=0.85, color=colors[idx])
+    
+    ax.set_xlabel('Resonance Frequency', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Average Power (μW)', fontsize=12, fontweight='bold')
+    ax.set_title('Power Comparison: Pre-Mapping vs Post-Mapping (ML Models)', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'graph1_power_comparison.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Graph 1 saved: graph1_power_comparison.png")
+    plt.close()
+    
+    # ========== Graph 2: Model Accuracy (Max Power by Model) ==========
+    fig2, ax = plt.subplots(figsize=(10, 6))
+    
+    # Prepare data
+    model_data = {
+        'Pre-Mapping': results_df['max_power_before'].values,
+    }
+    for model_name in model_names:
+        col_name = f'{model_name}_max_power'
+        if col_name in results_df.columns:
+            model_data[f'{model_name}'] = results_df[col_name].values
+    
+    # Box plot
+    box_data = list(model_data.values())
+    labels = list(model_data.keys())
+    bp = ax.boxplot(box_data, labels=labels, patch_artist=True, widths=0.6)
+    
+    # Color the boxes
+    colors_box = ['#FF6B6B'] + colors[:len(model_names)]
+    for patch, color in zip(bp['boxes'], colors_box):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    ax.set_ylabel('Maximum Power (μW)', fontsize=12, fontweight='bold')
+    ax.set_title('Model Performance: Maximum Power Distribution', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'graph2_model_performance.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Graph 2 saved: graph2_model_performance.png")
+    plt.close()
+    
+    # ========== Graph 3: Power per Resonator (40Hz, 50Hz, 60Hz) ==========
+    fig3, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    for ax_idx, res_freq in enumerate(resonance_freqs):
+        ax = axes[ax_idx]
+        
+        # Pre-mapping
+        pre_col = f'power_before_{res_freq}Hz'
+        ax.hist(results_df[pre_col], bins=30, alpha=0.6, label='Pre-Mapping', 
+                color='#FF6B6B', edgecolor='black')
+        
+        # Post-mapping
+        for model_idx, model_name in enumerate(model_names):
+            post_col = f'{model_name}_power_{res_freq}Hz'
+            if post_col in results_df.columns:
+                ax.hist(results_df[post_col], bins=30, alpha=0.5, 
+                       label=f'{model_name}', color=colors[model_idx], edgecolor='black')
+        
+        ax.set_xlabel('Power (μW)', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=11, fontweight='bold')
+        ax.set_title(f'{res_freq}Hz Resonator Power', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=9)
+        ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'graph3_power_per_resonator.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Graph 3 saved: graph3_power_per_resonator.png")
+    plt.close()
+    
+    # ========== Graph 4: Power Improvement (Delta) ==========
+    fig4, ax = plt.subplots(figsize=(10, 6))
+    
+    # Calculate improvements
+    improvements = []
+    improvement_labels = []
+    improvement_colors = []
+    
+    for model_name in model_names:
+        col_name = f'{model_name}_improvement'
+        if col_name in results_df.columns:
+            improvements.append(results_df[col_name].values)
+            improvement_labels.append(model_name)
+            improvement_colors.append(colors[len(improvements)-1])
+    
+    # Violin plot
+    if improvements:
+        parts = ax.violinplot(improvements, positions=range(len(improvements)), 
+                              showmeans=True, showmedians=True)
+        
+        # Color the violins
+        for idx, pc in enumerate(parts['bodies']):
+            pc.set_facecolor(improvement_colors[idx])
+            pc.set_alpha(0.7)
+        
+        ax.set_xticks(range(len(improvements)))
+        ax.set_xticklabels(improvement_labels, fontsize=11)
+        ax.set_ylabel('Power Improvement (μW)', fontsize=12, fontweight='bold')
+        ax.set_title('Power Improvement Distribution by Model', fontsize=14, fontweight='bold')
+        ax.axhline(y=0, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Zero Improvement')
+        ax.grid(axis='y', alpha=0.3)
+        ax.legend(fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'graph4_power_improvement.png', dpi=150, bbox_inches='tight')
+    print(f"  ✓ Graph 4 saved: graph4_power_improvement.png")
+    plt.close()
+    
+    print(f"\n✓ All visualizations saved to: {output_path}")
 
 
 # ============================================================================
@@ -297,92 +538,48 @@ def analyze_folder(folder_path, model_name="Model", window_size=512, stride=256)
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) < 2:
-        print("Usage: python compare_mapping_strategy.py <folder_path> [model_name] [window_size] [stride]")
-        print("\nExamples:")
-        print("  python compare_mapping_strategy.py /Users/seohyeon/AT_freq_tuning/data_v3 'Raw Data'")
-        print("  python compare_mapping_strategy.py /Users/seohyeon/AT_freq_tuning/freq_tuning_svm/svm_512 'SVM 512' 512 256")
+    workspace_root = Path(__file__).parent
+    
+    print("\n" + "="*80)
+    print("GENERALIZED LINEAR ARRAY VEH POWER ANALYSIS")
+    print("="*80)
+    
+    # Load ML models
+    print("\n[Loading ML Models]")
+    ml_models = load_ml_models()
+    
+    if not ml_models:
+        print("WARNING: No ML models loaded. Proceeding with pre-mapping only.")
+    
+    # Default data folder
+    data_folder = workspace_root / 'data_v3'
+    
+    if not data_folder.exists():
+        print(f"ERROR: Data folder not found: {data_folder}")
         sys.exit(1)
     
-    folder_path = sys.argv[1]
-    model_name = sys.argv[2] if len(sys.argv) > 2 else "Model"
-    window_size = int(sys.argv[3]) if len(sys.argv) > 3 else 512
-    stride = int(sys.argv[4]) if len(sys.argv) > 4 else 256
-    
-    results_df = analyze_folder(folder_path, model_name, window_size, stride)
+    # Analyze
+    print(f"\n[Analyzing Data]")
+    results_df = analyze_folder_with_models(
+        str(data_folder),
+        window_size=512,
+        stride=256,
+        ml_models=ml_models
+    )
     
     if results_df is not None:
         # Save results
-        output_path = Path(folder_path).parent / f"{model_name.replace(' ', '_')}_comparison.csv"
-        results_df.to_csv(output_path, index=False)
-        print(f"\n✓ Results saved: {output_path}")
+        output_path = workspace_root / 'model_results'
+        output_path.mkdir(exist_ok=True)
         
-        # Visualization
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f'Energy Harvester Pre/Post Mapping Comparison: {model_name}', fontsize=16)
+        csv_output = output_path / 'veh_power_analysis.csv'
+        results_df.to_csv(csv_output, index=False)
+        print(f"\n✓ Results saved: {csv_output}")
         
-        # 1. Label distribution comparison
-        ax = axes[0, 0]
-        labels = ['40Hz', '50Hz', '60Hz']
-        before = [
-            len(results_df[results_df['label_before'] == 40]),
-            len(results_df[results_df['label_before'] == 50]),
-            len(results_df[results_df['label_before'] == 60]),
-        ]
-        after = [
-            len(results_df[results_df['label_after'] == 40]),
-            len(results_df[results_df['label_after'] == 50]),
-            len(results_df[results_df['label_after'] == 60]),
-        ]
-        x = np.arange(len(labels))
-        width = 0.35
-        ax.bar(x - width/2, before, width, label='Pre-Mapping', alpha=0.8)
-        ax.bar(x + width/2, after, width, label='Post-Mapping', alpha=0.8)
-        ax.set_ylabel('Sample Count')
-        ax.set_title('Label Distribution Comparison')
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels)
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
+        # Generate visualizations
+        print(f"\n[Generating Visualizations]")
+        generate_visualizations(results_df, ml_models, output_path)
         
-        # 2. Power comparison
-        ax = axes[0, 1]
-        ax.scatter(results_df['max_power_before'], results_df['max_power_after'], alpha=0.5, s=10)
-        min_val = min(results_df['max_power_before'].min(), results_df['max_power_after'].min())
-        max_val = max(results_df['max_power_before'].max(), results_df['max_power_after'].max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.5, label='Equal')
-        ax.set_xlabel('Max Power Pre-Mapping (μW)')
-        ax.set_ylabel('Max Power Post-Mapping (μW)')
-        ax.set_title('Power Improvement')
-        ax.legend()
-        ax.grid(alpha=0.3)
-        
-        # 3. Frequency mapping error
-        ax = axes[1, 0]
-        ax.hist(results_df['freq_error'], bins=30, alpha=0.7, edgecolor='black')
-        ax.axvline(results_df['freq_error'].mean(), color='r', linestyle='--', 
-                   label=f"Mean: {results_df['freq_error'].mean():.2f} Hz")
-        ax.set_xlabel('Frequency Mapping Error (Hz)')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Frequency Mapping Error Distribution')
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
-        
-        # 4. Peak frequency distribution
-        ax = axes[1, 1]
-        ax.hist(results_df['peak_freq_original'], bins=50, alpha=0.7, label='Original Peak', edgecolor='black')
-        ax.hist(results_df['mapped_freq'], bins=50, alpha=0.7, label='Post-Mapping', edgecolor='black')
-        ax.axvline(40, color='red', linestyle='--', alpha=0.5, label='Resonance Freq')
-        ax.axvline(50, color='green', linestyle='--', alpha=0.5)
-        ax.axvline(60, color='blue', linestyle='--', alpha=0.5)
-        ax.set_xlabel('Frequency (Hz)')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Peak Frequency Distribution')
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        plot_path = Path(folder_path).parent / f"{model_name.replace(' ', '_')}_comparison.png"
-        plt.savefig(plot_path, dpi=150)
-        print(f"✓ Graph saved: {plot_path}")
-        plt.close()
+        print(f"\n{'='*80}")
+        print("ANALYSIS COMPLETE")
+        print(f"{'='*80}")

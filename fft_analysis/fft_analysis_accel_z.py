@@ -115,7 +115,7 @@ def analyze_single_file(
         file_path,
         output_dir,
         plot_dir,
-        fft_size=8192,
+        fft_size=1024,
         apply_filter=True,
         filter_order=5,
         threshold_method="std",
@@ -209,7 +209,7 @@ def analyze_single_file(
 # 배치 분석 함수
 def analyze_all_files(
         data_dir,
-        fft_size=8192,
+        fft_size=1024,
         apply_filter=True,
         filter_order=5,
         threshold_method="std",
@@ -313,7 +313,7 @@ if __name__ == "__main__":
 
     results = analyze_all_files(
         data_dir=DATA_DIR,
-        fft_size=8192,
+        fft_size=1024,
         apply_filter=True,
         filter_order=5,
         threshold_method="std",

@@ -1,133 +1,116 @@
 import numpy as np
+import pandas as pd
 import xgboost as xgb
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support
 import joblib
 from pathlib import Path
-from data_preprocessing import create_classification_dataset_fixed
-from config import DATA_DIR, OUTPUT_DIR, MODEL_DIR, XGBOOST_CONFIG
+from data_preprocessing import create_classification_dataset_single_snr
+from config import DATA_DIR, OUTPUT_DIR, MODEL_DIR
 
+SNR_LEVELS = [-10, -5, 0, 5, 10]
 
 def train_xgboost_model():
-    """XGBoost 모델 학습 및 평가 파이프라인"""
+    """XGBoost 모델 SNR별 학습 실험"""
     print("=" * 70)
-    print("데이터셋 생성 중...")
+    print("XGBoost SNR별 학습 실험 (각 SNR마다 독립적으로 데이터 생성)")
     print("=" * 70)
     
-    # 출력 디렉토리 미리 생성
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     Path(MODEL_DIR).mkdir(parents=True, exist_ok=True)
     
-    # 데이터셋 생성
-    X_train, y_train, X_test, y_test, freq_train, freq_test, snr_train, snr_test = \
-        create_classification_dataset_fixed(data_dir=DATA_DIR, output_dir=OUTPUT_DIR)
+    all_results = []
     
-    print(f"\n✓ 훈련 데이터: {X_train.shape}, 테스트 데이터: {X_test.shape}")
-
-    # XGBoost 모델 설정
-    print(f"\n{'=' * 70}")
-    print(f"XGBoost 모델 파라미터")
-    print(f"{'=' * 70}")
-    for key, val in XGBOOST_CONFIG.items():
-        print(f"  {key}: {val}")
-    print()
+    for snr_level in SNR_LEVELS:
+        print(f"\n{'='*70}")
+        print(f"SNR {snr_level}dB 학습 시작")
+        print(f"{'='*70}")
+        
+        # 해당 SNR로 독립적으로 데이터 생성
+        X_train, y_train, X_test, y_test = create_classification_dataset_single_snr(
+            data_dir=DATA_DIR,
+            output_dir=OUTPUT_DIR,
+            snr_level=snr_level
+        )
+        
+        print(f"\n✓ SNR {snr_level}dB 데이터: 훈련 {X_train.shape}, 테스트 {X_test.shape}")
+        
+        # 클래스 분포 출력
+        unique_train, counts_train = np.unique(y_train, return_counts=True)
+        unique_test, counts_test = np.unique(y_test, return_counts=True)
+        
+        print(f"\n훈련 클래스 분포:")
+        for freq, count in zip(unique_train, counts_train):
+            print(f"  {freq}Hz: {count}개 ({count/len(y_train)*100:.2f}%)")
+        
+        print(f"\n테스트 클래스 분포:")
+        for freq, count in zip(unique_test, counts_test):
+            print(f"  {freq}Hz: {count}개 ({count/len(y_test)*100:.2f}%)")
+        
+        # XGBoost 모델 학습
+        print(f"\nXGBoost 모델 학습 중...")
+        model = xgb.XGBClassifier(
+            max_depth=5,
+            learning_rate=0.1,
+            n_estimators=100,
+            objective='multi:softmax',
+            num_class=3,
+            random_state=42,
+            n_jobs=-1
+        )
+        model.fit(X_train, y_train)
+        
+        # 예측 및 평가
+        y_pred_train = model.predict(X_train)
+        y_pred_test = model.predict(X_test)
+        
+        train_acc = accuracy_score(y_train, y_pred_train)
+        test_acc = accuracy_score(y_test, y_pred_test)
+        
+        # 클래스별 성능
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_test, y_pred_test, average=None, zero_division=0
+        )
+        
+        print(f"\n훈련 정확도: {train_acc:.4f}")
+        print(f"테스트 정확도: {test_acc:.4f}")
+        
+        print(f"\n클래스별 성능:")
+        for i, (freq, p, r, f, s) in enumerate(zip(unique_test, precision, recall, f1, support)):
+            print(f"  {freq}Hz - Precision: {p:.4f}, Recall: {r:.4f}, F1: {f:.4f}, Support: {s}")
+        
+        # 모델 저장
+        model_filename = Path(MODEL_DIR) / f"xgb_snr_{snr_level}db.pkl"
+        joblib.dump(model, model_filename)
+        print(f"\n✓ 모델 저장: {model_filename}")
+        
+        # 결과 기록
+        result = {
+            'snr_db': snr_level,
+            'train_samples': len(y_train),
+            'test_samples': len(y_test),
+            'train_accuracy': train_acc,
+            'test_accuracy': test_acc
+        }
+        
+        for freq, p, r, f, s in zip(unique_test, precision, recall, f1, support):
+            result[f'precision_{int(freq)}Hz'] = p
+            result[f'recall_{int(freq)}Hz'] = r
+            result[f'f1_{int(freq)}Hz'] = f
+            result[f'support_{int(freq)}Hz'] = int(s)
+        
+        all_results.append(result)
     
-    # 클래스 가중치 자동 계산 (불균형 처리)
-    from sklearn.utils.class_weight import compute_class_weight
-    class_weights = compute_class_weight('balanced', 
-                                        classes=np.unique(y_train), 
-                                        y=y_train)
+    # 전체 결과 저장
+    results_df = pd.DataFrame(all_results)
+    results_csv = Path(OUTPUT_DIR) / "xgb_snr_experiment_results.csv"
+    results_df.to_csv(results_csv, index=False)
     
-    scale_pos_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
-    print(f"클래스 가중치 (불균형 보정): {scale_pos_weight_dict}\n")
-    
-    # XGBoost 모델 생성 및 학습
-    print("모델 학습 중...")
-    xgb_model = xgb.XGBClassifier(**XGBOOST_CONFIG)
-    xgb_model.fit(X_train, y_train, verbose=False)
-    
-    # 모델 평가
-    train_accuracy = xgb_model.score(X_train, y_train)
-    print(f"\n✓ 훈련 정확도: {train_accuracy:.4f}")
-    
-    # 테스트 평가
-    y_pred = xgb_model.predict(X_test)
-    test_accuracy = accuracy_score(y_test, y_pred)
-    print(f"✓ 테스트 정확도: {test_accuracy:.4f}\n")
-    
-    print("=" * 70)
-    print("분류 보고서")
-    print("=" * 70)
-    print(classification_report(y_test, y_pred, target_names=['40Hz', '50Hz', '60Hz']))
-
-    # 클래스별 상세 지표 계산
-    print("=" * 70)
-    print("클래스별 상세 지표 (따로 계산)")
-    print("=" * 70)
-    cm = confusion_matrix(y_test, y_pred)
-    precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred)
-    
-    class_names = ['40Hz', '50Hz', '60Hz']
-    print(f"\n{'클래스':<10} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
-    print("-" * 80)
-    
-    for i, class_name in enumerate(class_names):
-        # 클래스별 정확도 (그 클래스에 대해 맞게 분류한 비율)
-        class_accuracy = cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0
-        print(f"{class_name:<10} {class_accuracy:<12.4f} {precision[i]:<12.4f} {recall[i]:<12.4f} {f1[i]:<12.4f} {support[i]:<10}")
-    
-    # 가중 평균
-    weighted_accuracy = np.average([cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0 for i in range(3)], 
-                                    weights=support)
-    weighted_precision = np.average(precision, weights=support)
-    weighted_recall = np.average(recall, weights=support)
-    weighted_f1 = np.average(f1, weights=support)
-    
-    print("-" * 80)
-    print(f"{'Weighted':<10} {weighted_accuracy:<12.4f} {weighted_precision:<12.4f} {weighted_recall:<12.4f} {weighted_f1:<12.4f}")
-    
-    # 혼동 행렬
-    print("\n" + "=" * 70)
-    print("혼동 행렬 (Confusion Matrix)")
-    print("=" * 70)
-    print(f"\n{'':>15} {'40Hz':>10} {'50Hz':>10} {'60Hz':>10}")
-    print("-" * 50)
-    for i, class_name in enumerate(class_names):
-        print(f"{class_name:>15} {cm[i, 0]:>10} {cm[i, 1]:>10} {cm[i, 2]:>10}")
-    
-    # 결과 저장
-    model_path = MODEL_DIR / "xgb_model.pkl"
-    joblib.dump(xgb_model, model_path)
-    print(f"\n✓ 모델 저장됨: {model_path}")
-    
-    # 결과 로그 저장
-    log_path = Path(__file__).parent / "xgb_training.log"
-    with open(log_path, 'w', encoding='utf-8') as f:
-        f.write("=" * 70 + "\n")
-        f.write("XGBoost 모델 학습 결과\n")
-        f.write("=" * 70 + "\n\n")
-        f.write(f"훈련 데이터: {X_train.shape}\n")
-        f.write(f"테스트 데이터: {X_test.shape}\n")
-        f.write(f"훈련 정확도: {train_accuracy:.4f}\n")
-        f.write(f"테스트 정확도: {test_accuracy:.4f}\n\n")
-        f.write("=" * 70 + "\n")
-        f.write("분류 보고서\n")
-        f.write("=" * 70 + "\n")
-        f.write(classification_report(y_test, y_pred, target_names=['40Hz', '50Hz', '60Hz']))
-        f.write("\n" + "=" * 70 + "\n")
-        f.write("클래스별 상세 지표\n")
-        f.write("=" * 70 + "\n")
-        f.write(f"{'클래스':<10} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12}\n")
-        f.write("-" * 60 + "\n")
-        for i, class_name in enumerate(class_names):
-            class_accuracy = cm[i, i] / cm[i, :].sum() if cm[i, :].sum() > 0 else 0
-            f.write(f"{class_name:<10} {class_accuracy:<12.4f} {precision[i]:<12.4f} {recall[i]:<12.4f} {f1[i]:<12.4f}\n")
-    
-    print(f"✓ 로그 저장됨: {log_path}")
-    
-    print(f"\n{'=' * 70}")
-    print("✓ XGBoost 모델 학습 완료!")
-    print(f"{'=' * 70}\n")
-
+    print(f"\n{'='*70}")
+    print("모든 SNR 실험 완료!")
+    print(f"{'='*70}")
+    print(f"\n결과 저장: {results_csv}")
+    print("\n전체 결과:")
+    print(results_df[['snr_db', 'train_samples', 'test_samples', 'train_accuracy', 'test_accuracy']])
 
 if __name__ == "__main__":
     train_xgboost_model()

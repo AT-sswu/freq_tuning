@@ -328,6 +328,76 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=WINDOW
     return X_train, y_train, X_test, y_test, freq_train, freq_test, snr_train, snr_test
 
 
+def create_classification_dataset_single_snr(data_dir, output_dir, snr_level, window_size=WINDOW_SIZE,
+                                             stride=STRIDE, test_size=TEST_SIZE, random_state=RANDOM_STATE):
+    """
+    특정 SNR 레벨로만 증강된 데이터셋 생성
+    
+    Args:
+        snr_level: 훈련/테스트에 사용할 SNR 레벨 (예: -10, -5, 0, 5, 10)
+    """
+    signals = load_all_signals(data_dir)
+    signal_indices = np.arange(len(signals))
+    
+    # 클래스 레이블 결정
+    signal_labels = []
+    for signal_data in signals:
+        windows = sliding_window_split(signal_data['signal'], window_size=window_size, stride=256)
+        if len(windows) > 0:
+            _, peak_freq = extract_frequency_features(windows[0], signal_data['sample_rate'])
+            label = assign_label(peak_freq)
+            signal_labels.append(label)
+        else:
+            signal_labels.append(0)
+    
+    # Stratified Sampling
+    signal_labels_array = np.array(signal_labels)
+    class_counts_signals = np.bincount(signal_labels_array)
+    min_count = np.min(class_counts_signals)
+    
+    if min_count >= 2:
+        train_indices, test_indices = train_test_split(
+            signal_indices, test_size=test_size, random_state=random_state, stratify=signal_labels_array
+        )
+    else:
+        train_indices, test_indices = train_test_split(
+            signal_indices, test_size=test_size, random_state=random_state
+        )
+
+    X_train_all, y_train_all = [], []
+    X_test_all, y_test_all = [], []
+    
+    # 훈련 데이터: 특정 SNR로 증강
+    for idx in train_indices:
+        signal_data = signals[idx]
+        augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_level)
+        X_list, y_list, _, _ = process_single_signal(
+            augmented_signal, signal_data['sample_rate'], window_size, stride, 
+            signal_data['file_name'], snr_level
+        )
+        X_train_all.extend(X_list)
+        y_train_all.extend(y_list)
+    
+    # 테스트 데이터: 동일한 SNR로 증강
+    for idx in test_indices:
+        signal_data = signals[idx]
+        augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_level)
+        X_list, y_list, _, _ = process_single_signal(
+            augmented_signal, signal_data['sample_rate'], window_size, stride, 
+            signal_data['file_name'], snr_level
+        )
+        X_test_all.extend(X_list)
+        y_test_all.extend(y_list)
+    
+    # 최종 데이터 정리
+    X_train = np.array(X_train_all).reshape(-1, 3)
+    y_train = np.array(y_train_all)
+    X_test = np.array(X_test_all).reshape(-1, 3)
+    y_test = np.array(y_test_all)
+    
+    return X_train, y_train, X_test, y_test
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("강력한 클래스 불균형 처리 FFT 데이터 전처리 시작")

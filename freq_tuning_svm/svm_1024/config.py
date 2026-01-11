@@ -6,6 +6,9 @@ MODEL_DIR = "/Users/seohyeon/AT_freq_tuning/freq_tuning_svm/svm_1024/model_resul
 # 공진 주파수 (고정)
 RESONANCE_FREQS = [40, 50, 60]
 
+# Q-factor 설정
+Q_FACTOR = 10
+
 # 데이터 증강 설정
 WINDOW_SIZE = 1024
 STRIDE = 512

@@ -270,18 +270,32 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=WINDOW
                         freq_train_all.extend(freq_aug)
                         snr_train_all.extend(snr_aug)
 
-    # 테스트 데이터 (증강 없음)
+    # 테스트 데이터 (SNR 0dB 고정 또는 증강 없음)
     print(f"\n[단계 3] 테스트 데이터 수집 중...")
     X_test_all, y_test_all = [], []
     freq_test_all = []
     snr_test_all = []
     
+    # SNR 0dB 고정 옵션
+    use_snr0_test = True  # True로 변경하면 SNR 0dB 테스트 데이터 사용
+    
     for idx in test_indices:
         signal_data = signals[idx]
-        X_list, y_list, freq_list, snr_list = process_single_signal(
-            signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
-            signal_data['file_name'], signal_data['snr_db']
-        )
+        
+        if use_snr0_test:
+            # SNR 0dB 노이즈 추가
+            signal_noisy = add_gaussian_noise_with_snr(signal_data['signal'], 0)
+            X_list, y_list, freq_list, snr_list = process_single_signal(
+                signal_noisy, signal_data['sample_rate'], window_size, stride, 
+                signal_data['file_name'], 0
+            )
+        else:
+            # 원본 신호 (증강 없음)
+            X_list, y_list, freq_list, snr_list = process_single_signal(
+                signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
+                signal_data['file_name'], signal_data['snr_db']
+            )
+        
         X_test_all.extend(X_list)
         y_test_all.extend(y_list)
         freq_test_all.extend(freq_list)

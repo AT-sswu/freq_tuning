@@ -19,7 +19,7 @@ RANDOM_STATE = 42
 
 # 증강 설정
 ENABLE_AUGMENTATION = True
-AUGMENTATION_SNR_DB = [15]  # SNR 값 리스트
+AUGMENTATION_SNR_DB = [-10, -5, 5, 10]  # SNR 값 리스트
 
 # XGBoost 모델 설정
 XGBOOST_CONFIG = {

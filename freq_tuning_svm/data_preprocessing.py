@@ -159,7 +159,6 @@ def load_all_signals(data_dir):
         except Exception as e:
             print(f"  [{idx + 1}] {file_path.name} - 오류: {e}")
             continue
-
     print(f"\n총 {len(signals)}개 신호 로드 완료")
     return signals
 

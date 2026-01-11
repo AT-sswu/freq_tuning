@@ -85,7 +85,7 @@ def calculate_veh_power(frequency, resonance_freq,
 
 def load_ml_models():
     """
-    Load trained ML models (RF, SVM, KNN) from workspace using pickle or joblib
+    Load trained ML models (RF, SVM, KNN, XGB) from workspace using pickle or joblib
     Returns dict of {model_name: (model, scaler)}
     """
     models = {}
@@ -104,6 +104,10 @@ def load_ml_models():
             workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'knn_model.joblib',
             workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'knn_model.pkl',
         ],
+        'XGB': [
+            workspace_root / 'freq_tuning_xgb' / 'xgb_512' / 'model_results' / 'xgb_model.joblib',
+            workspace_root / 'freq_tuning_xgb' / 'xgb_512' / 'model_results' / 'xgb_model.pkl',
+        ],
     }
     
     scaler_configs = {
@@ -118,6 +122,10 @@ def load_ml_models():
         'KNN': [
             workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'scaler.joblib',
             workspace_root / 'freq_tuning_knn' / 'knn_512' / 'model_results' / 'scaler.pkl',
+        ],
+        'XGB': [
+            workspace_root / 'freq_tuning_xgb' / 'xgb_512' / 'model_results' / 'scaler.joblib',
+            workspace_root / 'freq_tuning_xgb' / 'xgb_512' / 'model_results' / 'scaler.pkl',
         ],
     }
     
@@ -376,156 +384,184 @@ def analyze_folder_with_models(folder_path, window_size=512, stride=256, ml_mode
     return combined_df
 
 
-def generate_visualizations(results_df, ml_models, output_path):
+def generate_visualizations(results_df, ml_models, output_path, window_size=512):
     """
-    Generate 4 visualization graphs as requested
+    Generate 6-subplot visualization matching the reference graph
     """
     if results_df is None or len(results_df) == 0:
         print("No results to visualize")
         return
     
-    plt.style.use('seaborn-v0_8-darkgrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
     resonance_freqs = [40, 50, 60]
     model_names = list(ml_models.keys()) if ml_models else []
     
-    # ========== Graph 1: Power Comparison (Pre vs Post) ==========
-    fig1, ax = plt.subplots(figsize=(10, 6))
+    # Create figure with 2x3 subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle(f'Model Performance Comparison - Power Improvement Analysis (Window Size: {window_size})', 
+                 fontsize=16, fontweight='bold', y=0.995)
     
-    categories = [f'{freq}Hz' for freq in resonance_freqs]
-    x = np.arange(len(categories))
-    width = 0.15
+    # Define colors
+    pre_color = '#FF6B6B'
+    model_colors = {'SVM': '#CD5C5C', 'RF': '#4ECDC4', 'KNN': '#F39C12', 'XGB': '#95E1D3'}
     
-    # Pre-mapping (aggregated)
-    pre_powers = [
-        results_df['power_before_40Hz'].mean(),
-        results_df['power_before_50Hz'].mean(),
-        results_df['power_before_60Hz'].mean(),
-    ]
+    # ========== (1) Mean Power - Pre-Mapping vs All Models ==========
+    ax = axes[0, 0]
     
-    # Plot pre-mapping
-    ax.bar(x - width/2 - width, pre_powers, width, label='Pre-Mapping (Raw)', alpha=0.85, color='#FF6B6B')
+    categories = ['Pre-Mapping'] + model_names
+    mean_powers = [results_df['max_power_before'].mean()] + \
+                  [results_df[f'{m}_max_power'].mean() for m in model_names]
     
-    # Plot post-mapping for each model
-    colors = ['#4ECDC4', '#45B7D1', '#FFA07A']
-    for idx, model_name in enumerate(model_names):
-        post_powers = [
-            results_df[f'{model_name}_power_40Hz'].mean(),
-            results_df[f'{model_name}_power_50Hz'].mean(),
-            results_df[f'{model_name}_power_60Hz'].mean(),
-        ]
-        ax.bar(x + (idx - len(model_names)/2) * width + width, post_powers, width, 
-               label=f'Post-Mapping ({model_name})', alpha=0.85, color=colors[idx])
+    bars = ax.bar(categories, mean_powers, 
+                  color=[pre_color] + [model_colors.get(m, '#888888') for m in model_names],
+                  alpha=0.8, edgecolor='black', linewidth=1.5)
     
-    ax.set_xlabel('Resonance Frequency', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Average Power (μW)', fontsize=12, fontweight='bold')
-    ax.set_title('Power Comparison: Pre-Mapping vs Post-Mapping (ML Models)', fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels(categories)
-    ax.legend(loc='upper right', fontsize=10)
+    # Add value labels on bars
+    for bar, val in zip(bars, mean_powers):
+        height = bar.get_height()
+        label_text = f'{val:.2e}' if val > 1e9 else f'{val:.2f}'
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               label_text, ha='center', va='bottom', fontweight='bold', fontsize=10)
+    
+    ax.set_ylabel('Mean Power (μW)', fontsize=11, fontweight='bold')
+    ax.set_title(f'(1) Mean Power - Window {window_size}', fontsize=12, fontweight='bold')
+    ax.set_ylim(0, max(mean_powers) * 1.15)
+    ax.grid(axis='y', alpha=0.3)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    # ========== (2) Power Improvement % ==========
+    ax = axes[0, 1]
+    
+    baseline_power = results_df['max_power_before'].mean()
+    improvements_pct = [(results_df[f'{m}_max_power'].mean() - baseline_power) / baseline_power * 100 
+                       for m in model_names]
+    
+    bars = ax.bar(model_names, improvements_pct,
+                  color=[model_colors.get(m, '#888888') for m in model_names],
+                  alpha=0.8, edgecolor='black', linewidth=1.5)
+    
+    # Add value labels
+    for bar, val in zip(bars, improvements_pct):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{val:+.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
+    
+    ax.set_ylabel('Power Improvement (%)', fontsize=11, fontweight='bold')
+    ax.set_title(f'(2) Power Improvement % - Window {window_size}', fontsize=12, fontweight='bold')
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+    ax.grid(axis='y', alpha=0.3)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    # ========== (3) Power Improvement Percentage (duplicate for symmetry) ==========
+    ax = axes[0, 2]
+    
+    bars = ax.bar(model_names, improvements_pct,
+                  color=[model_colors.get(m, '#888888') for m in model_names],
+                  alpha=0.8, edgecolor='black', linewidth=1.5)
+    
+    for bar, val in zip(bars, improvements_pct):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{val:+.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
+    
+    ax.set_ylabel('Power Improvement Percentage', fontsize=11, fontweight='bold')
+    ax.set_title(f'(3) Power Improvement Percentage - Window {window_size}', fontsize=12, fontweight='bold')
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+    ax.grid(axis='y', alpha=0.3)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    
+    # ========== (4) Pre-Mapping vs Post-Mapping Power Output ==========
+    ax = axes[1, 0]
+    
+    x_pos = np.arange(len(model_names))
+    width = 0.35
+    
+    pre_vals = [results_df['max_power_before'].mean()] * len(model_names)
+    post_vals = [results_df[f'{m}_max_power'].mean() for m in model_names]
+    
+    bars1 = ax.bar(x_pos - width/2, pre_vals, width, label='Pre-Mapping', 
+                   color=pre_color, alpha=0.8, edgecolor='black', linewidth=1.5)
+    bars2 = ax.bar(x_pos + width/2, post_vals, width, label='Post-Mapping',
+                   color='#2ECC71', alpha=0.8, edgecolor='black', linewidth=1.5)
+    
+    ax.set_ylabel('Mean Power (μW)', fontsize=11, fontweight='bold')
+    ax.set_title('(4) Pre-Mapping vs Post-Mapping Power Output', fontsize=12, fontweight='bold')
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(model_names)
+    ax.legend(loc='upper left', fontsize=10)
     ax.grid(axis='y', alpha=0.3)
     
-    plt.tight_layout()
-    plt.savefig(output_path / 'graph1_power_comparison.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Graph 1 saved: graph1_power_comparison.png")
-    plt.close()
+    # ========== (5) Power Variability (Standard Deviation) ==========
+    ax = axes[1, 1]
     
-    # ========== Graph 2: Model Accuracy (Max Power by Model) ==========
-    fig2, ax = plt.subplots(figsize=(10, 6))
+    pre_std = results_df['max_power_before'].std()
+    post_stds = [results_df[f'{m}_max_power'].std() for m in model_names]
     
-    # Prepare data
-    model_data = {
-        'Pre-Mapping': results_df['max_power_before'].values,
-    }
-    for model_name in model_names:
-        col_name = f'{model_name}_max_power'
-        if col_name in results_df.columns:
-            model_data[f'{model_name}'] = results_df[col_name].values
+    variability = [pre_std] + post_stds
+    var_categories = ['Pre-Mapping'] + model_names
     
-    # Box plot
-    box_data = list(model_data.values())
-    labels = list(model_data.keys())
-    bp = ax.boxplot(box_data, labels=labels, patch_artist=True, widths=0.6)
+    bars = ax.bar(var_categories, variability,
+                  color=[pre_color] + [model_colors.get(m, '#888888') for m in model_names],
+                  alpha=0.8, edgecolor='black', linewidth=1.5)
     
-    # Color the boxes
-    colors_box = ['#FF6B6B'] + colors[:len(model_names)]
-    for patch, color in zip(bp['boxes'], colors_box):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+    for bar, val in zip(bars, variability):
+        height = bar.get_height()
+        label_text = f'{val:.2e}' if val > 1e9 else f'{val:.2f}'
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               label_text, ha='center', va='bottom', fontweight='bold', fontsize=9)
     
-    ax.set_ylabel('Maximum Power (μW)', fontsize=12, fontweight='bold')
-    ax.set_title('Model Performance: Maximum Power Distribution', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Standard Deviation (μW)', fontsize=11, fontweight='bold')
+    ax.set_title(f'(5) Power Consistency (Lower = Better) - Window {window_size}', fontsize=12, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
     
-    plt.tight_layout()
-    plt.savefig(output_path / 'graph2_model_performance.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Graph 2 saved: graph2_model_performance.png")
-    plt.close()
+    # ========== (6) Performance Summary Table ==========
+    ax = axes[1, 2]
+    ax.axis('tight')
+    ax.axis('off')
     
-    # ========== Graph 3: Power per Resonator (40Hz, 50Hz, 60Hz) ==========
-    fig3, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    for ax_idx, res_freq in enumerate(resonance_freqs):
-        ax = axes[ax_idx]
-        
-        # Pre-mapping
-        pre_col = f'power_before_{res_freq}Hz'
-        ax.hist(results_df[pre_col], bins=30, alpha=0.6, label='Pre-Mapping', 
-                color='#FF6B6B', edgecolor='black')
-        
-        # Post-mapping
-        for model_idx, model_name in enumerate(model_names):
-            post_col = f'{model_name}_power_{res_freq}Hz'
-            if post_col in results_df.columns:
-                ax.hist(results_df[post_col], bins=30, alpha=0.5, 
-                       label=f'{model_name}', color=colors[model_idx], edgecolor='black')
-        
-        ax.set_xlabel('Power (μW)', fontsize=11, fontweight='bold')
-        ax.set_ylabel('Frequency', fontsize=11, fontweight='bold')
-        ax.set_title(f'{res_freq}Hz Resonator Power', fontsize=12, fontweight='bold')
-        ax.legend(fontsize=9)
-        ax.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path / 'graph3_power_per_resonator.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Graph 3 saved: graph3_power_per_resonator.png")
-    plt.close()
-    
-    # ========== Graph 4: Power Improvement (Delta) ==========
-    fig4, ax = plt.subplots(figsize=(10, 6))
-    
-    # Calculate improvements
-    improvements = []
-    improvement_labels = []
-    improvement_colors = []
+    # Create table data
+    table_data = []
+    table_data.append(['Model', 'Mean Power', 'Improvement', 'Status'])
     
     for model_name in model_names:
-        col_name = f'{model_name}_improvement'
-        if col_name in results_df.columns:
-            improvements.append(results_df[col_name].values)
-            improvement_labels.append(model_name)
-            improvement_colors.append(colors[len(improvements)-1])
-    
-    # Violin plot
-    if improvements:
-        parts = ax.violinplot(improvements, positions=range(len(improvements)), 
-                              showmeans=True, showmedians=True)
+        mean_pow = results_df[f'{model_name}_max_power'].mean()
+        improve = (mean_pow - baseline_power) / baseline_power * 100
+        status = 'Very Good' if improve > 120 else 'Good' if improve > 100 else 'Acceptable'
         
-        # Color the violins
-        for idx, pc in enumerate(parts['bodies']):
-            pc.set_facecolor(improvement_colors[idx])
-            pc.set_alpha(0.7)
-        
-        ax.set_xticks(range(len(improvements)))
-        ax.set_xticklabels(improvement_labels, fontsize=11)
-        ax.set_ylabel('Power Improvement (μW)', fontsize=12, fontweight='bold')
-        ax.set_title('Power Improvement Distribution by Model', fontsize=14, fontweight='bold')
-        ax.axhline(y=0, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Zero Improvement')
-        ax.grid(axis='y', alpha=0.3)
-        ax.legend(fontsize=10)
+        table_data.append([
+            model_name,
+            f'{mean_pow:.2e}' if mean_pow > 1e9 else f'{mean_pow:.2f}',
+            f'{improve:+.1f}%',
+            status
+        ])
     
+    table = ax.table(cellText=table_data, cellLoc='center', loc='center',
+                    colWidths=[0.2, 0.3, 0.2, 0.25])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2.5)
+    
+    # Style the table
+    for i in range(len(table_data)):
+        for j in range(4):
+            cell = table[(i, j)]
+            if i == 0:  # Header
+                cell.set_facecolor('#34495E')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                if j == 0:
+                    cell.set_facecolor('#ECF0F1')
+                else:
+                    cell.set_facecolor('#F8F9F9')
+    
+    ax.set_title(f'(6) Performance Summary - Window {window_size}', fontsize=12, fontweight='bold', pad=20)
+    
+    # Save figure
     plt.tight_layout()
-    plt.savefig(output_path / 'graph4_power_improvement.png', dpi=150, bbox_inches='tight')
-    print(f"  ✓ Graph 4 saved: graph4_power_improvement.png")
+    output_file = output_path / f'model_comparison_w{window_size}.png'
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"  ✓ 6-subplot graph saved: model_comparison_w{window_size}.png")
     plt.close()
     
     print(f"\n✓ All visualizations saved to: {output_path}")
@@ -558,28 +594,31 @@ if __name__ == "__main__":
         print(f"ERROR: Data folder not found: {data_folder}")
         sys.exit(1)
     
-    # Analyze
+    # Analyze for different window sizes
     print(f"\n[Analyzing Data]")
-    results_df = analyze_folder_with_models(
-        str(data_folder),
-        window_size=512,
-        stride=256,
-        ml_models=ml_models
-    )
     
-    if results_df is not None:
-        # Save results
-        output_path = workspace_root / 'model_results'
-        output_path.mkdir(exist_ok=True)
+    for window_size in [512, 1024, 2048]:
+        print(f"\n--- Processing Window Size: {window_size} ---")
+        results_df = analyze_folder_with_models(
+            str(data_folder),
+            window_size=window_size,
+            stride=window_size // 2,
+            ml_models=ml_models
+        )
         
-        csv_output = output_path / 'veh_power_analysis.csv'
-        results_df.to_csv(csv_output, index=False)
-        print(f"\n✓ Results saved: {csv_output}")
-        
-        # Generate visualizations
-        print(f"\n[Generating Visualizations]")
-        generate_visualizations(results_df, ml_models, output_path)
+        if results_df is not None:
+            # Save results
+            output_path = workspace_root / 'model_results'
+            output_path.mkdir(exist_ok=True)
+            
+            csv_output = output_path / f'veh_power_analysis_w{window_size}.csv'
+            results_df.to_csv(csv_output, index=False)
+            print(f"\n✓ Results saved: {csv_output}")
+            
+            # Generate visualizations
+            print(f"\n[Generating Visualizations for Window Size {window_size}]")
+            generate_visualizations(results_df, ml_models, output_path, window_size=window_size)
         
         print(f"\n{'='*80}")
-        print("ANALYSIS COMPLETE")
+        print(f"ANALYSIS COMPLETE - Window Size {window_size}")
         print(f"{'='*80}")

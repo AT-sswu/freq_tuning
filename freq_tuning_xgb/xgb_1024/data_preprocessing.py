@@ -367,33 +367,102 @@ def create_classification_dataset_single_snr(data_dir, output_dir, snr_level, wi
     X_train_all, y_train_all = [], []
     X_test_all, y_test_all = [], []
     
-    # 훈련 데이터: 특정 SNR로 증강
+    # [1단계] 훈련 데이터: 원본 수집
+    print(f"[1단계] 원본 훈련 데이터 수집 중...")
     for idx in train_indices:
         signal_data = signals[idx]
-        augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_level)
-        X_list, y_list, _, _ = process_single_signal(
-            augmented_signal, signal_data['sample_rate'], window_size, stride, 
-            signal_data['file_name'], snr_level
+        X_orig, y_orig, _, _ = process_single_signal(
+            signal_data['signal'], signal_data['sample_rate'], window_size, stride,
+            signal_data['file_name'], None
         )
-        X_train_all.extend(X_list)
-        y_train_all.extend(y_list)
+        X_train_all.extend(X_orig)
+        y_train_all.extend(y_orig)
     
-    # 테스트 데이터: 동일한 SNR로 증강
+    # [2단계] 클래스 불균형 분석
+    y_train_orig = np.array(y_train_all)
+    class_counts = np.bincount(y_train_orig, minlength=len(RESONANCE_FREQS))
+    print(f"\n[2단계] 원본 훈련 데이터 클래스 분포:")
+    for class_id, count in enumerate(class_counts):
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count}개")
+    
+    # 클래스별 증강 배수 계산 (최대 클래스에 맞춤)
+    augmentation_multipliers = calculate_augmentation_multiplier(class_counts)
+    print(f"\n클래스별 증강 배수:")
+    for class_id, multiplier in augmentation_multipliers.items():
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {multiplier:.2f}배")
+    
+    # [3단계] SNR 0dB 증강 + 클래스 밸런싱
+    print(f"\n[3단계] SNR {snr_level}dB 증강 + 클래스 밸런싱 중...")
+    
+    # 각 클래스별로 필요한 추가 샘플 수 계산
+    max_count = np.max(class_counts)
+    for class_id in range(len(RESONANCE_FREQS)):
+        current_count = class_counts[class_id]
+        needed_count = max_count - current_count
+        multiplier = augmentation_multipliers[class_id]
+        
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {current_count}개 → {max_count}개 (증강 {needed_count}개 필요, {multiplier:.2f}배)")
+        
+        if needed_count == 0:
+            continue
+        
+        # 해당 클래스 샘플만 증강 (반복 적용)
+        augment_rounds = int(np.ceil(multiplier - 1))
+        for round_idx in range(augment_rounds):
+            for idx in train_indices:
+                signal_data = signals[idx]
+                augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_level)
+                X_aug, y_aug, _, _ = process_single_signal(
+                    augmented_signal, signal_data['sample_rate'], window_size, stride,
+                    signal_data['file_name'], snr_level
+                )
+                # 해당 클래스만 추가
+                for x, y in zip(X_aug, y_aug):
+                    if y == class_id:
+                        X_train_all.append(x)
+                        y_train_all.append(y)
+    
+    # [4단계] 테스트 데이터: 원본 + 동일한 SNR 증강
+    print(f"\n[4단계] 테스트 데이터 수집 중...")
     for idx in test_indices:
         signal_data = signals[idx]
+        
+        # 1. 원본 데이터 추가
+        X_orig, y_orig, _, _ = process_single_signal(
+            signal_data['signal'], signal_data['sample_rate'], window_size, stride,
+            signal_data['file_name'], None
+        )
+        X_test_all.extend(X_orig)
+        y_test_all.extend(y_orig)
+        
+        # 2. SNR 증강 데이터 추가
         augmented_signal = add_gaussian_noise_with_snr(signal_data['signal'], snr_level)
-        X_list, y_list, _, _ = process_single_signal(
+        X_aug, y_aug, _, _ = process_single_signal(
             augmented_signal, signal_data['sample_rate'], window_size, stride, 
             signal_data['file_name'], snr_level
         )
-        X_test_all.extend(X_list)
-        y_test_all.extend(y_list)
+        X_test_all.extend(X_aug)
+        y_test_all.extend(y_aug)
     
     # 최종 데이터 정리
     X_train = np.array(X_train_all).reshape(-1, 3)
     y_train = np.array(y_train_all)
     X_test = np.array(X_test_all).reshape(-1, 3)
     y_test = np.array(y_test_all)
+    
+    # 최종 클래스 분포 출력
+    print(f"\n{'='*70}")
+    print("[최종 데이터셋]")
+    print(f"{'='*70}")
+    print(f"훈련 데이터: {X_train.shape}")
+    train_class_counts = np.bincount(y_train, minlength=len(RESONANCE_FREQS))
+    for class_id, count in enumerate(train_class_counts):
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count}개 ({count/len(y_train)*100:.2f}%)")
+    
+    print(f"\n테스트 데이터: {X_test.shape}")
+    test_class_counts = np.bincount(y_test, minlength=len(RESONANCE_FREQS))
+    for class_id, count in enumerate(test_class_counts):
+        print(f"  클래스 {class_id} ({RESONANCE_FREQS[class_id]}Hz): {count}개 ({count/len(y_test)*100:.2f}%)")
     
     return X_train, y_train, X_test, y_test
 

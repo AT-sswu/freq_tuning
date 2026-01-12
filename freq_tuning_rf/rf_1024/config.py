@@ -12,7 +12,7 @@ Q_FACTOR = 10
 # 데이터 증강 설정
 WINDOW_SIZE = 1024
 STRIDE = 512
-AUGMENTATION_SNR_DB = [-10, -5, 5, 10]  # 증강할 SNR 레벨 (dB)
+AUGMENTATION_SNR_DB = [-10, -5, 0, 5, 10]  # 증강할 SNR 레벨 (dB)
 ENABLE_AUGMENTATION = True  # 증강 활성화 여부
 
 # 데이터 분할 설정

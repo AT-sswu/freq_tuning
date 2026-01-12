@@ -124,7 +124,8 @@ def load_all_signals(data_dir, allowed_snrs=None):
     """지정된 경로의 모든 CSV 파일을 읽어와 물리적 의미가 있는 신호 객체로 변환
 
     allowed_snrs: 리스트로 전달하면 해당 SNR(또는 None=원본)만 포함
-                 SNR 별 훈련 시에도 원본은 항상 포함 (원본 + 해당 SNR 증강)
+                 예: allowed_snrs=[-10] → 원본 + SNR -10dB 증강만
+                 예: allowed_snrs=None → 원본만 (증강 없음)
     """
     data_path = Path(data_dir)
     csv_files = sorted(list(data_path.glob("*.csv")))
@@ -139,31 +140,30 @@ def load_all_signals(data_dir, allowed_snrs=None):
             sample_rate = calculate_sample_rate(df)
             signal = df['Accel_Z'].dropna().values
 
-            # 원본 신호 추가 (항상 포함: 각 SNR별 훈련 시에도 원본이 필요)
+            # 원본 신호 추가 (항상 포함)
             signals.append({
                 'signal': signal,
                 'sample_rate': sample_rate,
                 'file_name': file_path.name,
-                'signal_id': idx,  # 파일 단위 분할을 위해 고유 ID 부여
+                'signal_id': idx,
                 'is_augmented': False,
                 'snr_db': None
             })
 
             # 데이터 증강 적용 (SNR 기반 가우시안 노이즈)
-            if ENABLE_AUGMENTATION:
+            if ENABLE_AUGMENTATION and allowed_snrs is not None:
                 for snr_db in AUGMENTATION_SNR_DB:
-                    # allowed_snrs가 지정된 경우 해당 SNR만 생성
-                    if (allowed_snrs is not None) and (snr_db not in allowed_snrs):
-                        continue
-                    augmented_signal = add_gaussian_noise_with_snr(signal, snr_db)
-                    signals.append({
-                        'signal': augmented_signal,
-                        'sample_rate': sample_rate,
-                        'file_name': f"{file_path.name}_aug_SNR{snr_db}dB",
-                        'signal_id': idx,  # 동일 파일 그룹으로 유지 (데이터 누수 방지)
-                        'is_augmented': True,
-                        'snr_db': snr_db
-                    })
+                    # allowed_snrs에 포함된 SNR만 생성
+                    if snr_db in allowed_snrs:
+                        augmented_signal = add_gaussian_noise_with_snr(signal, snr_db)
+                        signals.append({
+                            'signal': augmented_signal,
+                            'sample_rate': sample_rate,
+                            'file_name': f"{file_path.name}_aug_SNR{snr_db}dB",
+                            'signal_id': idx,
+                            'is_augmented': True,
+                            'snr_db': snr_db
+                        })
         except Exception:
             continue
     return signals
@@ -172,41 +172,61 @@ def create_classification_dataset_fixed(data_dir, output_dir, window_size=WINDOW
                                         stride=STRIDE, test_size=TEST_SIZE, random_state=RANDOM_STATE,
                                         allowed_snrs=None):
                                         
-    """[핵심 로직] 데이터 누수 방지를 고려한 학습/테스트 데이터셋 통합 생성 함수"""
+    """[핵심 로직] 데이터 누수 방지를 고려한 학습/테스트 데이터셋 통합 생성 함수
+    
+    수정 사항:
+    - 훈련: 원본 + 해당 SNR 증강 데이터만 사용 (예: SNR -10dB 실험 → 원본 + SNR -10dB만)
+    - 테스트: 원본 데이터만 사용
+    - allowed_snrs: 사용할 SNR 레벨 리스트 (예: [-10] → 원본 + SNR -10dB만)
+    """
+    # 원본 + 지정된 SNR 증강만 로드
     signals = load_all_signals(data_dir, allowed_snrs=allowed_snrs)
-
-    # 데이터 누수(Data Leakage) 방지: 윈도우 단위로 섞으면 동일 파일의 파편이 Train/Test에 동시에 들어감
-    # 이를 막기 위해 파일(Signal ID) 자체를 먼저 분리한 후, 분리된 그룹 내에서만 윈도우를 추출함
-    signal_indices = np.arange(len(signals))
-    train_indices, test_indices = train_test_split(
-        signal_indices, test_size=test_size, random_state=random_state
+    
+    # 원본 신호만 추출하여 파일 ID 기준으로 Train/Test 분할
+    original_signals = [s for s in signals if not s['is_augmented']]
+    unique_signal_ids = list(set(s['signal_id'] for s in original_signals))
+    
+    # 파일 ID 기준으로 Train/Test 분할
+    train_ids, test_ids = train_test_split(
+        unique_signal_ids, test_size=test_size, random_state=random_state
     )
+    
+    train_ids_set = set(train_ids)
+    test_ids_set = set(test_ids)
 
+    # 훈련 데이터 - 원본 + 해당 SNR 증강만 사용
     X_train_all, y_train_all = [], []
-    freq_train_all = []  # 입력 주파수 추적
-    snr_train_all = []  # 훈련 데이터 SNR 메타데이터
-    for idx in train_indices:
-        signal_data = signals[idx]
-        X_list, y_list, freq_list, snr_list = process_single_signal(
-            signal_data['signal'], signal_data['sample_rate'], window_size, stride, signal_data['file_name'], signal_data['snr_db']
-        )
-        X_train_all.extend(X_list); y_train_all.extend(y_list)
-        freq_train_all.extend(freq_list)
-        snr_train_all.extend(snr_list)
+    freq_train_all = []
+    snr_train_all = []
+    
+    for signal_data in signals:
+        if signal_data['signal_id'] in train_ids_set:
+            # 훈련 파일에 속한 신호 (원본 + 해당 SNR 증강만)
+            X_list, y_list, freq_list, snr_list = process_single_signal(
+                signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
+                signal_data['file_name'], signal_data['snr_db']
+            )
+            X_train_all.extend(X_list)
+            y_train_all.extend(y_list)
+            freq_train_all.extend(freq_list)
+            snr_train_all.extend(snr_list)
 
+    # 테스트 데이터 - 원본만 사용
     X_test_all, y_test_all = [], []
-    freq_test_all = []  # 입력 주파수 추적
-    snr_test_all = []  # 테스트 데이터 SNR 메타데이터
-    for idx in test_indices:
-        signal_data = signals[idx]
-
-        # 테스트 셋은 학습 셋에서 보지 못한 독립적인 파일(신호)들로 구성됨
-        X_list, y_list, freq_list, snr_list = process_single_signal(
-            signal_data['signal'], signal_data['sample_rate'], window_size, stride, signal_data['file_name'], signal_data['snr_db']
-        )
-        X_test_all.extend(X_list); y_test_all.extend(y_list)
-        freq_test_all.extend(freq_list)
-        snr_test_all.extend(snr_list)
+    freq_test_all = []
+    snr_test_all = []
+    
+    for signal_data in original_signals:
+        if signal_data['signal_id'] in test_ids_set:
+            # 테스트는 항상 원본만 사용
+            X_list, y_list, freq_list, snr_list = process_single_signal(
+                signal_data['signal'], signal_data['sample_rate'], window_size, stride, 
+                signal_data['file_name'], signal_data['snr_db']
+            )
+            X_test_all.extend(X_list)
+            y_test_all.extend(y_list)
+            freq_test_all.extend(freq_list)
+            snr_test_all.extend(snr_list)
 
     # 머신러닝 모델의 입력을 위해 최종 데이터를 넘파이 행렬 형태로 변환
     X_train, y_train = np.array(X_train_all), np.array(y_train_all)

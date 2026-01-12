@@ -71,28 +71,7 @@ def fft_analysis(data, sample_rate=296, fft_size=None, threshold_method="std", n
     else:
         positive_amps_normalized = positive_amps
 
-    # 공진 주파수
-    resonance_freq = positive_freqs[np.argmax(positive_amps_normalized)]
-
-    # Threshold 계산
-    threshold = calculate_threshold(positive_amps_normalized, threshold_method, n_std)
-
-    # Threshold 이상 구간 탐색
-    threshold_ranges = []
-    above_threshold = positive_amps_normalized >= threshold
-    in_range = False
-    for i in range(len(positive_freqs)):
-        if above_threshold[i] and not in_range:
-            range_start = positive_freqs[i]
-            in_range = True
-        elif not above_threshold[i] and in_range:
-            range_end = positive_freqs[i - 1]
-            threshold_ranges.append((range_start, range_end))
-            in_range = False
-    if in_range:
-        threshold_ranges.append((range_start, positive_freqs[-1]))
-
-    return positive_freqs, positive_amps_normalized, resonance_freq, threshold_ranges, threshold, positive_amps
+    return positive_freqs, positive_amps_normalized, positive_amps
 
 
 # 30-60Hz 대역 에너지 계산
@@ -140,7 +119,7 @@ def analyze_single_file(
         cutoff = sample_rate / 4
         data = butter_lowpass_filter(data, cutoff=cutoff, fs=sample_rate, order=filter_order)
 
-    freqs, amps_normalized, resonance_freq, threshold_ranges, threshold, amps_raw = fft_analysis(
+    freqs, amps_normalized, amps_raw = fft_analysis(
         data,
         sample_rate=sample_rate,
         fft_size=fft_size,
@@ -148,54 +127,29 @@ def analyze_single_file(
         n_std=n_std
     )
 
-    # 30-60Hz 대역 에너지 계산
-    band_energies = calculate_band_energy(freqs, amps_raw)
-
-    # 최대 에너지 대역 찾기
-    max_band = max(band_energies, key=band_energies.get)
-    max_energy = band_energies[max_band]
-
-    # Threshold 범위 문자열 변환
-    threshold_ranges_str = ""
-    if threshold_ranges:
-        ranges_list = [f"{r[0]:.2f}-{r[1]:.2f}Hz" for r in threshold_ranges]
-        threshold_ranges_str = "; ".join(ranges_list)
-    else:
-        threshold_ranges_str = "없음"
-
     result = {
         'File': file_title,
         'Axis': 'Accel_Z',
-        'Resonance_Frequency_Hz': round(resonance_freq, 2),
-        'Threshold_Value': round(threshold, 4),
-        'Threshold_Method': threshold_method,
-        'Threshold_Ranges': threshold_ranges_str,
         'Sample_Rate': round(sample_rate, 2),
         'FFT_Size': fft_size,
         'Filter_Applied': apply_filter,
-        'Filter_Order': filter_order if apply_filter else 'N/A',
-        'Max_Energy_Band': max_band,
-        'Max_Energy_Value': round(max_energy, 4),
-        **{f'Energy_{k}': round(v, 4) for k, v in band_energies.items()}
+        'Filter_Order': filter_order if apply_filter else 'N/A'
     }
 
     # 그래프 그리기
     plt.figure(figsize=(12, 6))
 
     plt.plot(freqs, amps_normalized, label="Amplitude", linewidth=0.8)
-    plt.axvline(resonance_freq, color='r', linestyle='--', label=f'Resonance: {resonance_freq:.2f} Hz')
-    plt.axhline(y=threshold, color='g', linestyle=':', label=f'Threshold: {threshold:.3f}')
 
-    # 30-60Hz 영역 강조
-    plt.axvspan(30, 60, alpha=0.2, color='yellow', label='30-60Hz Band')
-
-    plt.title(f"FFT Spectrum - Accel_Z - {file_title}\nMax Energy: {max_band} ({max_energy:.2f})")
-    plt.xlabel("Frequency (Hz)")
-    plt.ylabel("Amplitude (Normalized %)")
+    plt.title(f"FFT Spectrum - Accel_Z", fontsize=18, fontweight='bold')
+    plt.xlabel("Frequency (Hz)", fontsize=16, fontweight='bold')
+    plt.ylabel("Amplitude (Normalized %)", fontsize=16, fontweight='bold')
     plt.xlim(0, 150)  # 0-150Hz 범위만 표시
     plt.ylim(0, 100)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    plt.legend(fontsize=12)
     plt.tight_layout()
 
     # 그래프 저장
@@ -269,7 +223,7 @@ def analyze_all_files(
 
             if result:
                 all_results.append(result)
-                print(f"  ✓ 완료 - 최대 에너지 대역: {result['Max_Energy_Band']}")
+                print(f"  ✓ 완료")
 
         except Exception as e:
             import traceback
@@ -294,12 +248,6 @@ def analyze_all_files(
         print(f"  분석된 파일 수: {len(all_results)}개")
         print(f"  축: Accel_Z")
         print(f"  그래프 저장 위치: {plot_dir}")
-
-        # 대역별 최대 에너지 통계
-        print("\n[대역별 최대 에너지 분포]")
-        band_counts = results_df['Max_Energy_Band'].value_counts()
-        for band, count in band_counts.items():
-            print(f"  {band}: {count}개 파일")
 
         return results_df
     else:
